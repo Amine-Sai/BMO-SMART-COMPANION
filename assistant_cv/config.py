@@ -20,6 +20,10 @@ SEQ_LEN = 30
 
 HAND_MODEL_URL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task"
 HAND_MODEL_PATH = MODELS_DIR / "hand_landmarker.task"
+PALM_MODEL_URL = "https://huggingface.co/opencv/palm_detection_mediapipe/resolve/main/palm_detection_mediapipe_2023feb.onnx"
+PALM_MODEL_PATH = MODELS_DIR / "palm_detection.onnx"
+HANDPOSE_MODEL_URL = "https://huggingface.co/opencv/handpose_estimation_mediapipe/resolve/main/handpose_estimation_mediapipe_2023feb.onnx"
+HANDPOSE_MODEL_PATH = MODELS_DIR / "handpose_estimation.onnx"
 SIGN_MODEL_PATH = MODELS_DIR / "sign.pt"
 YOLO_MODEL_PATH = MODELS_DIR / "yolo26s.pt"
 

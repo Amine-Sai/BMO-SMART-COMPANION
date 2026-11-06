@@ -1,47 +1,116 @@
-"""MediaPipe HandLandmarker wrapper and scale/translation-invariant normalization."""
+"""Standalone Hand Landmark pipeline using OpenCV Zoo MediaPipe ONNX models.
+
+Replaces the crashing C++ MediaPipe Tasks runtime with pure OpenCV DNN inference.
+Keeps identical public API:
+  - landmarks(frame_bgr) -> (2, 21, 3) float32
+  - norm(x) -> (126,) float32
+"""
 
 from __future__ import annotations
 
+import pathlib
 import urllib.request
-
-import cv2
-import mediapipe as mp
-from mediapipe.tasks import python as mp_python
-from mediapipe.tasks.python import vision
+import cv2 as cv
 import numpy as np
 
 try:
-    from .config import HAND_MODEL_PATH, HAND_MODEL_URL
-except ImportError:
-    from config import HAND_MODEL_PATH, HAND_MODEL_URL
-
-HAND_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
-if not HAND_MODEL_PATH.exists():
-    urllib.request.urlretrieve(HAND_MODEL_URL, HAND_MODEL_PATH)
-
-_h = vision.HandLandmarker.create_from_options(
-    vision.HandLandmarkerOptions(
-        base_options=mp_python.BaseOptions(model_asset_path=str(HAND_MODEL_PATH)),
-        num_hands=2,
+    from .config import (
+        HANDPOSE_MODEL_PATH,
+        HANDPOSE_MODEL_URL,
+        MODELS_DIR,
+        PALM_MODEL_PATH,
+        PALM_MODEL_URL,
     )
-)
+    from .mp_handpose import MPHandPose
+    from .mp_palmdet import MPPalmDet
+except ImportError:
+    from config import (
+        HANDPOSE_MODEL_PATH,
+        HANDPOSE_MODEL_URL,
+        MODELS_DIR,
+        PALM_MODEL_PATH,
+        PALM_MODEL_URL,
+    )
+    from mp_handpose import MPHandPose
+    from mp_palmdet import MPPalmDet
+
+
+def _ensure_model(path: pathlib.Path, url: str) -> pathlib.Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists() or path.stat().st_size < 1_000_000:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req) as resp, open(path, "wb") as f:
+            f.write(resp.read())
+    return path
+
+
+_palm_detector: MPPalmDet | None = None
+_handpose_detector: MPHandPose | None = None
+
+
+def get_detectors() -> tuple[MPPalmDet, MPHandPose]:
+    """Lazy singleton initializer for palm and hand pose detectors."""
+    global _palm_detector, _handpose_detector
+    if _palm_detector is None:
+        p_path = _ensure_model(PALM_MODEL_PATH, PALM_MODEL_URL)
+        _palm_detector = MPPalmDet(
+            modelPath=str(p_path),
+            nmsThreshold=0.3,
+            scoreThreshold=0.6,
+        )
+    if _handpose_detector is None:
+        h_path = _ensure_model(HANDPOSE_MODEL_PATH, HANDPOSE_MODEL_URL)
+        _handpose_detector = MPHandPose(
+            modelPath=str(h_path),
+            confThreshold=0.6,
+        )
+    return _palm_detector, _handpose_detector
 
 
 def landmarks(frame_bgr: np.ndarray) -> np.ndarray:
-    """Extract 2-hand 21-point 3D landmarks into shape (2, 21, 3) float32."""
-    out = np.zeros((2, 21, 3), np.float32)
+    """Extract 2-hand 21-point 3D landmarks into shape (2, 21, 3) float32.
+
+    Slot 0 = Left hand, Slot 1 = Right hand.
+    Coordinates are normalized into [0, 1] across image width and height.
+    """
+    out = np.zeros((2, 21, 3), dtype=np.float32)
     if frame_bgr is None or frame_bgr.size == 0:
         return out
 
-    rgb = np.ascontiguousarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
-    img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-    res = _h.detect(img)
-    for h_lm, h_cls in zip(res.hand_landmarks, res.handedness):
-        slot = 0 if h_cls[0].category_name == "Left" else 1
+    h_img, w_img = frame_bgr.shape[:2]
+    palm_net, hand_net = get_detectors()
+
+    palms = palm_net.infer(frame_bgr)
+    if palms is None or len(palms) == 0:
+        return out
+
+    for palm in palms[:4]:  # evaluate up to top 4 candidate palms
+        handpose = hand_net.infer(frame_bgr, palm)
+        if handpose is None:
+            continue
+
+        # handpose layout: [bbox(4), landmarks_screen(63), landmarks_world(63), handedness(1), conf(1)]
+        handedness = float(handpose[-2])
+        conf = float(handpose[-1])
+        if conf < 0.5:
+            continue
+
+        # 0 = Left (<= 0.5), 1 = Right (> 0.5)
+        slot = 0 if handedness <= 0.5 else 1
         if out[slot].any():
             slot = 1 - slot
-        if not out[slot].any():
-            out[slot] = [[p.x, p.y, p.z] for p in h_lm]
+        if out[slot].any():
+            continue  # both slots occupied
+
+        # landmarks_screen is (21, 3) in pixel coordinates (x, y, z)
+        lm_px = handpose[4:67].reshape(21, 3).astype(np.float32)
+        lm_norm = np.zeros((21, 3), dtype=np.float32)
+        lm_norm[:, 0] = lm_px[:, 0] / max(1.0, float(w_img))
+        lm_norm[:, 1] = lm_px[:, 1] / max(1.0, float(h_img))
+        lm_norm[:, 2] = lm_px[:, 2] / max(1.0, float(w_img))  # depth normalized by width
+
+        out[slot] = lm_norm
+
     return out
 
 
@@ -51,7 +120,8 @@ def norm(x: np.ndarray) -> np.ndarray:
     for h in range(2):
         if x[h].any():
             x[h] -= x[h][0]
-            x[h] /= np.linalg.norm(x[h][9]) + 1e-6
+            scale = np.linalg.norm(x[h][9])  # middle finger base (point 9) distance
+            x[h] /= scale + 1e-6
     return x.reshape(-1).astype(np.float32)
 
 

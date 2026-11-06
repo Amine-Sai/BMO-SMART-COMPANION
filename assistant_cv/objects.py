@@ -63,7 +63,6 @@ class ObjectDetector:
                 persist=True,
                 verbose=False,
                 device=self.device,
-                half=use_half,
             )
         else:
             results = self.det.predict(
@@ -72,7 +71,6 @@ class ObjectDetector:
                 classes=classes,
                 verbose=False,
                 device=self.device,
-                half=use_half,
             )
 
         if not results:
