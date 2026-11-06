@@ -1,0 +1,23 @@
+# Virtual Environments
+.venv/
+env/
+venv/
+
+# Progression & Local Notes (local-only per user instruction)
+PROGRESSION.md
+
+# Python cache & artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Model weights & downloads (auto-downloaded on first run)
+assistant_cv/models/*.pt
+assistant_cv/models/*.task
+assistant_cv/models/*.onnx
+
+# Local biometric & dataset directories
+assistant_cv/gallery/*.npy
+assistant_cv/data/*/*.npy
