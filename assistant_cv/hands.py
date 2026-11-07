@@ -9,15 +9,13 @@ Keeps identical public API:
 from __future__ import annotations
 
 import pathlib
-import urllib.request
-import cv2 as cv
+from urllib.request import Request, urlopen
 import numpy as np
 
 try:
     from .config import (
         HANDPOSE_MODEL_PATH,
         HANDPOSE_MODEL_URL,
-        MODELS_DIR,
         PALM_MODEL_PATH,
         PALM_MODEL_URL,
     )
@@ -27,7 +25,6 @@ except ImportError:
     from config import (
         HANDPOSE_MODEL_PATH,
         HANDPOSE_MODEL_URL,
-        MODELS_DIR,
         PALM_MODEL_PATH,
         PALM_MODEL_URL,
     )
@@ -38,8 +35,8 @@ except ImportError:
 def _ensure_model(path: pathlib.Path, url: str) -> pathlib.Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists() or path.stat().st_size < 1_000_000:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req) as resp, open(path, "wb") as f:
+        req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urlopen(req) as resp, open(path, "wb") as f:
             f.write(resp.read())
     return path
 
@@ -84,7 +81,7 @@ def landmarks(frame_bgr: np.ndarray) -> np.ndarray:
     if palms is None or len(palms) == 0:
         return out
 
-    for palm in palms[:4]:  # evaluate up to top 4 candidate palms
+    for palm in palms[:2]:  # evaluate up to top 2 candidate palms
         handpose = hand_net.infer(frame_bgr, palm)
         if handpose is None:
             continue
@@ -128,3 +125,12 @@ def norm(x: np.ndarray) -> np.ndarray:
 def extract(frame_bgr: np.ndarray) -> np.ndarray:
     """Convenience helper returning normalized (126,) hand vector from a BGR frame."""
     return norm(landmarks(frame_bgr))
+
+
+def has_palms(frame_bgr: np.ndarray) -> bool:
+    """Fast probe returning True if at least one candidate palm is present in frame."""
+    if frame_bgr is None or frame_bgr.size == 0:
+        return False
+    palm_net, _ = get_detectors()
+    palms = palm_net.infer(frame_bgr)
+    return bool(palms is not None and len(palms) > 0)

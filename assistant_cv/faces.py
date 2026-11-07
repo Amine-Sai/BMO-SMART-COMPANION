@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -21,6 +22,7 @@ from assistant_cv.config import (
     GALLERY_DIR,
     get_onnx_providers,
 )
+from assistant_cv.registry import IdentityRegistry
 
 _FACE_APP: FaceAnalysis | None = None
 _IDENTIFIER: FaceIdentifier | None = None
@@ -30,7 +32,11 @@ def get_face_app() -> FaceAnalysis:
     """Lazily initialize and return the InsightFace buffalo_s FaceAnalysis instance."""
     global _FACE_APP
     if _FACE_APP is None:
-        app = FaceAnalysis(name="buffalo_s", providers=get_onnx_providers())
+        app = FaceAnalysis(
+            name="buffalo_s",
+            allowed_modules=["detection", "recognition"],
+            providers=get_onnx_providers(),
+        )
         app.prepare(ctx_id=0 if DEVICE == "cuda" else -1, det_size=(640, 640))
         _FACE_APP = app
     return _FACE_APP
@@ -45,6 +51,7 @@ class FaceIdentifier:
         app: FaceAnalysis | None = None,
     ) -> None:
         self.gallery_dir = Path(gallery_dir)
+        self.registry = IdentityRegistry(gallery_dir=self.gallery_dir)
         self.app: FaceAnalysis = app if app is not None else get_face_app()
         self.gallery: dict[str, np.ndarray] = {}
         self._gallery_names: list[str] = []
@@ -58,6 +65,8 @@ class FaceIdentifier:
         vecs: list[np.ndarray] = []
 
         self.gallery_dir.mkdir(parents=True, exist_ok=True)
+        self.registry.load()
+
         for npy_path in sorted(self.gallery_dir.glob("*.npy")):
             vec = np.load(npy_path).astype(np.float32).reshape(-1)
             norm = float(np.linalg.norm(vec))
@@ -74,6 +83,28 @@ class FaceIdentifier:
         else:
             self._gallery_matrix = np.empty((0, 512), dtype=np.float32)
         return self.gallery
+
+    def check_already_registered(
+        self,
+        embedding: np.ndarray,
+        tau: float = FACE_TAU,
+    ) -> tuple[str | None, float]:
+        """Check if an embedding matches an already registered identity."""
+        if not self._gallery_names or self._gallery_matrix.shape[0] == 0:
+            return None, 0.0
+
+        emb = np.asarray(embedding, dtype=np.float32).reshape(-1)
+        norm_val = float(np.linalg.norm(emb))
+        if norm_val > 1e-8:
+            emb = emb / norm_val
+
+        sims = self._gallery_matrix @ emb
+        best_idx = int(np.argmax(sims))
+        score = float(sims[best_idx])
+        if score >= tau:
+            matched_name = self._gallery_names[best_idx]
+            return matched_name, round(score, 3)
+        return None, round(score, 3)
 
     def identify(
         self,
@@ -117,6 +148,89 @@ class FaceIdentifier:
             )
 
         return results
+
+    def identify_and_embed(
+        self,
+        frame: np.ndarray,
+        tau: float = FACE_TAU,
+    ) -> list[dict[str, Any]]:
+        """Detect and identify faces, returning identities with their embeddings."""
+        if frame is None:
+            return []
+
+        faces = self.app.get(frame)
+        results: list[dict[str, Any]] = []
+
+        for f in faces:
+            name = "unknown"
+            score = 0.0
+            emb = np.asarray(f.normed_embedding, dtype=np.float32).reshape(-1)
+            norm_val = float(np.linalg.norm(emb))
+            if norm_val > 1e-8:
+                emb = emb / norm_val
+
+            if self._gallery_names and self._gallery_matrix.shape[0] > 0:
+                sims = self._gallery_matrix @ emb
+                best_idx = int(np.argmax(sims))
+                score = float(sims[best_idx])
+                name = self._gallery_names[best_idx]
+
+            bbox_coords = tuple(f.bbox.astype(int).tolist())
+            bbox: tuple[int, int, int, int] = (
+                int(bbox_coords[0]),
+                int(bbox_coords[1]),
+                int(bbox_coords[2]),
+                int(bbox_coords[3]),
+            )
+            results.append(
+                {
+                    "name": name if score >= tau else "unknown",
+                    "score": round(float(score), 3),
+                    "bbox": bbox,
+                    "embedding": emb,
+                }
+            )
+
+        return results
+
+    def save_identity(
+        self,
+        name: str,
+        embeddings: list[np.ndarray],
+        overwrite: bool = True,
+    ) -> Path:
+        """Average multiple embeddings, register in persistent registry, and reload gallery."""
+        clean_name = name.strip()
+        if not clean_name:
+            raise ValueError("Identity name must not be empty.")
+        if not embeddings:
+            raise ValueError("Cannot save identity with zero embeddings.")
+
+        e = np.mean(embeddings, axis=0).astype(np.float32)
+        norm_val = float(np.linalg.norm(e))
+        if norm_val > 1e-8:
+            e = e / norm_val
+
+        ok, msg, out_path = self.registry.register_person(clean_name, e, overwrite=overwrite)
+        if not ok and not overwrite:
+            raise ValueError(msg)
+
+        self.reload_gallery()
+        return out_path
+
+    def delete_identity(self, name_or_id: str) -> tuple[bool, str]:
+        """Manually delete a registered identity permanently."""
+        ok, msg = self.registry.delete_person(name_or_id)
+        if ok:
+            self.reload_gallery()
+        return ok, msg
+
+    def rename_identity(self, old_name: str, new_name: str) -> tuple[bool, str]:
+        """Rename an existing registered identity."""
+        ok, msg = self.registry.rename_person(old_name, new_name)
+        if ok:
+            self.reload_gallery()
+        return ok, msg
 
 
 def _get_identifier() -> FaceIdentifier:

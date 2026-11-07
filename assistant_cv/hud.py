@@ -193,9 +193,19 @@ def draw_objects(frame: np.ndarray, detections: Iterable[Any] | None) -> np.ndar
 
         label_str = str(label)
         color = BMO_CYAN if label_str.lower() == "person" else BMO_TEAL
-
         conf_val = float(conf) if conf is not None else 0.0
-        if obj_id is not None:
+
+        identity = det.get("identity") if isinstance(det, Mapping) else None
+        registered_name = det.get("registered_name") if isinstance(det, Mapping) else None
+        if label_str.lower() == "person" and identity:
+            is_known = str(identity).lower() not in ("unknown", "none", "")
+            color = BMO_GREEN if is_known else BMO_CYAN
+            id_prefix = f" #{obj_id}" if obj_id is not None else ""
+            tag = f"person{id_prefix} [{identity}] {conf_val:.2f}"
+        elif registered_name:
+            color = BMO_GREEN
+            tag = f"{label_str}: [{registered_name}] {conf_val:.2f}"
+        elif obj_id is not None:
             tag = f"{label_str} #{obj_id} {conf_val:.2f}"
         else:
             tag = f"{label_str} {conf_val:.2f}"
@@ -554,6 +564,132 @@ def draw_event_feed(
     return frame
 
 
+def draw_auto_enroll_overlay(
+    frame: np.ndarray,
+    enroll_info: Mapping[str, Any] | None,
+) -> np.ndarray:
+    """Draw a centered notification banner showing auto-enrollment progress."""
+    if frame is None or not enroll_info:
+        return frame
+
+    name = str(enroll_info.get("name", ""))
+    shots = int(enroll_info.get("shots", 0))
+    target = int(enroll_info.get("target", 8))
+    msg = str(enroll_info.get("msg", ""))
+    already_reg = bool(enroll_info.get("already_registered", False))
+    failed = bool(enroll_info.get("failed", False))
+    completed = bool(enroll_info.get("completed", False))
+    h, w = frame.shape[:2]
+
+    if already_reg:
+        banner_text = f"ALREADY REGISTERED: {msg}"
+        box_color = BMO_AMBER
+    elif failed:
+        banner_text = f"AUTO-ENROLL FAILED: {msg}"
+        box_color = BMO_RED
+    elif completed:
+        banner_text = f"AUTO-ENROLL COMPLETE: {msg}"
+        box_color = BMO_GREEN
+    else:
+        banner_text = f"AUTO-ENROLL: {name} ({shots}/{target}) | {msg}"
+        box_color = BMO_CYAN
+
+    font_scale = 0.50
+    (tw, th), baseline = cv2.getTextSize(banner_text, _FONT, font_scale, 1)
+    bw, bh = tw + 24, th + baseline + 16
+    bx1 = max(0, (w - bw) // 2)
+    bx2 = min(w, bx1 + bw)
+    by1 = 44
+    by2 = min(h - 10, by1 + bh)
+
+    _blend_rect(frame, bx1, by1, bx2, by2, BMO_DARK, alpha=0.85)
+    cv2.rectangle(frame, (bx1, by1), (bx2, by2), box_color, 2 if (already_reg or completed or failed) else 1, cv2.LINE_AA)
+    cv2.putText(
+        frame,
+        banner_text,
+        (bx1 + 12, by1 + th + 7),
+        _FONT,
+        font_scale,
+        BMO_WHITE,
+        1,
+        cv2.LINE_AA,
+    )
+    return frame
+
+
+def draw_auto_object_enroll_overlay(
+    frame: np.ndarray,
+    enroll_info: Mapping[str, Any] | None,
+) -> np.ndarray:
+    """Draw a centered notification banner showing object enrollment progress and target box."""
+    if frame is None or not enroll_info:
+        return frame
+
+    name = str(enroll_info.get("name", ""))
+    shots = int(enroll_info.get("shots", 0))
+    target = int(enroll_info.get("target", 6))
+    msg = str(enroll_info.get("msg", ""))
+    already_reg = bool(enroll_info.get("already_registered", False))
+    failed = bool(enroll_info.get("failed", False))
+    completed = bool(enroll_info.get("completed", False))
+    target_box = enroll_info.get("target_bbox")
+    h, w = frame.shape[:2]
+
+    # Draw bounding box around candidate object being enrolled
+    if target_box and len(target_box) >= 4 and not (completed or failed):
+        bx1, by1, bx2, by2 = map(int, target_box[:4])
+        draw_corner_box(
+            frame,
+            (bx1, by1, bx2, by2),
+            BMO_AMBER if already_reg else BMO_CYAN,
+            thickness=2,
+            corner_len=16,
+            label=f"ENROLL: {name}",
+        )
+
+    if already_reg:
+        banner_text = f"ALREADY REGISTERED: {msg}"
+        box_color = BMO_AMBER
+    elif failed:
+        banner_text = f"OBJECT ENROLL FAILED: {msg}"
+        box_color = BMO_RED
+    elif completed:
+        banner_text = f"OBJECT ENROLLED: {msg}"
+        box_color = BMO_GREEN
+    else:
+        banner_text = f"ENROLL OBJECT: {name} ({shots}/{target}) | {msg}"
+        box_color = BMO_CYAN
+
+    font_scale = 0.50
+    (tw, th), baseline = cv2.getTextSize(banner_text, _FONT, font_scale, 1)
+    bw, bh = tw + 24, th + baseline + 16
+    bx1 = max(0, (w - bw) // 2)
+    bx2 = min(w, bx1 + bw)
+    by1 = 44
+    by2 = min(h - 10, by1 + bh)
+
+    _blend_rect(frame, bx1, by1, bx2, by2, BMO_DARK, alpha=0.85)
+    cv2.rectangle(
+        frame,
+        (bx1, by1),
+        (bx2, by2),
+        box_color,
+        2 if (already_reg or completed or failed) else 1,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        frame,
+        banner_text,
+        (bx1 + 12, by1 + th + 7),
+        _FONT,
+        font_scale,
+        BMO_WHITE,
+        1,
+        cv2.LINE_AA,
+    )
+    return frame
+
+
 def render_hud(
     frame: np.ndarray,
     state: Mapping[str, Any] | None,
@@ -597,7 +733,13 @@ def render_hud(
     ev = events if events is not None else st.get("events")
     draw_event_feed(frame, ev)
 
-    # 6. Top status bar
+    # 6. Auto-enroll banner overlay if active
+    if st.get("auto_enroll"):
+        draw_auto_enroll_overlay(frame, st.get("auto_enroll"))
+    if st.get("auto_object_enroll"):
+        draw_auto_object_enroll_overlay(frame, st.get("auto_object_enroll"))
+
+    # 7. Top status bar
     tg = toggles if toggles is not None else st.get("toggles")
     draw_status_bar(
         frame,

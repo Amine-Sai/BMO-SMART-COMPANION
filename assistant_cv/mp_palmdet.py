@@ -1,9 +1,15 @@
 import numpy as np
 import cv2 as cv
+import onnxruntime as ort
+
+try:
+    from .config import get_onnx_providers
+except ImportError:
+    from config import get_onnx_providers
 
 class MPPalmDet:
     def __init__(self, modelPath, nmsThreshold=0.3, scoreThreshold=0.5, topK=5000, backendId=0, targetId=0):
-        self.model_path = modelPath
+        self.model_path = str(modelPath)
         self.nms_threshold = nmsThreshold
         self.score_threshold = scoreThreshold
         self.topK = topK
@@ -12,11 +18,18 @@ class MPPalmDet:
 
         self.input_size = np.array([192, 192]) # wh
 
-        self.model = cv.dnn.readNet(self.model_path)
-        if self.backend_id != 0:
-            self.model.setPreferableBackend(self.backend_id)
-        if self.target_id != 0:
-            self.model.setPreferableTarget(self.target_id)
+        # Prefer fast CUDA-accelerated ONNX Runtime session
+        try:
+            self.sess = ort.InferenceSession(self.model_path, providers=get_onnx_providers())
+            self.input_name = self.sess.get_inputs()[0].name
+            self.model = None
+        except Exception:
+            self.sess = None
+            self.model = cv.dnn.readNet(self.model_path)
+            if self.backend_id != 0:
+                self.model.setPreferableBackend(self.backend_id)
+            if self.target_id != 0:
+                self.model.setPreferableTarget(self.target_id)
 
         self.anchors = self._load_anchors()
 
@@ -27,8 +40,9 @@ class MPPalmDet:
     def setBackendAndTarget(self, backendId, targetId):
         self.backend_id = backendId
         self.target_id = targetId
-        self.model.setPreferableBackend(self.backend_id)
-        self.model.setPreferableTarget(self.target_id)
+        if self.model is not None:
+            self.model.setPreferableBackend(self.backend_id)
+            self.model.setPreferableTarget(self.target_id)
 
     def _preprocess(self, image):
         pad_bias = np.array([0., 0.]) # left, top
@@ -56,8 +70,11 @@ class MPPalmDet:
         input_blob, pad_bias = self._preprocess(image)
 
         # Forward
-        self.model.setInput(input_blob)
-        output_blob = self.model.forward(self.model.getUnconnectedOutLayersNames())
+        if self.sess is not None:
+            output_blob = self.sess.run(None, {self.input_name: input_blob})
+        else:
+            self.model.setInput(input_blob)
+            output_blob = self.model.forward(self.model.getUnconnectedOutLayersNames())
 
         # Postprocess
         results = self._postprocess(output_blob, np.array([w, h]), pad_bias)
@@ -65,43 +82,51 @@ class MPPalmDet:
         return results
 
     def _postprocess(self, output_blob, original_shape, pad_bias):
-        score = output_blob[1][0, :, 0]
-        box_delta = output_blob[0][0, :, 0:4]
-        landmark_delta = output_blob[0][0, :, 4:]
+        score = output_blob[1][0, :, 0].astype(np.float64)
+        score = 1.0 / (1.0 + np.exp(-score))
+
+        # Pre-filter by score_threshold to eliminate 99%+ of candidate anchors before NMS
+        valid_mask = score >= self.score_threshold
+        if not np.any(valid_mask):
+            return np.empty(shape=(0, 19))
+
+        score_f = score[valid_mask]
+        box_delta_f = output_blob[0][0, :, 0:4][valid_mask]
+        landmark_delta_f = output_blob[0][0, :, 4:][valid_mask]
+        anchors_f = self.anchors[valid_mask]
         scale = max(original_shape)
 
-        # get scores
-        score = score.astype(np.float64)
-        score = 1 / (1 + np.exp(-score))
-
         # get boxes
-        cxy_delta = box_delta[:, :2] / self.input_size
-        wh_delta = box_delta[:, 2:] / self.input_size
-        xy1 = (cxy_delta - wh_delta / 2 + self.anchors) * scale
-        xy2 = (cxy_delta + wh_delta / 2 + self.anchors) * scale
+        cxy_delta = box_delta_f[:, :2] / self.input_size
+        wh_delta = box_delta_f[:, 2:] / self.input_size
+        xy1 = (cxy_delta - wh_delta / 2.0 + anchors_f) * scale
+        xy2 = (cxy_delta + wh_delta / 2.0 + anchors_f) * scale
         boxes = np.concatenate([xy1, xy2], axis=1)
         boxes -= [pad_bias[0], pad_bias[1], pad_bias[0], pad_bias[1]]
-        # NMS
-        keep_idx = cv.dnn.NMSBoxes(boxes, score, self.score_threshold, self.nms_threshold, top_k=self.topK)
+
+        # NMS on pre-filtered candidates
+        keep_idx = cv.dnn.NMSBoxes(
+            boxes.tolist(),
+            score_f.tolist(),
+            self.score_threshold,
+            self.nms_threshold,
+            top_k=self.topK,
+        )
         if len(keep_idx) == 0:
             return np.empty(shape=(0, 19))
-        selected_score = score[keep_idx]
+        keep_idx = np.asarray(keep_idx).reshape(-1)
+        selected_score = score_f[keep_idx]
         selected_box = boxes[keep_idx]
 
         # get landmarks
-        selected_landmarks = landmark_delta[keep_idx].reshape(-1, 7, 2)
+        selected_landmarks = landmark_delta_f[keep_idx].reshape(-1, 7, 2)
         selected_landmarks = selected_landmarks / self.input_size
-        selected_anchors = self.anchors[keep_idx]
+        selected_anchors = anchors_f[keep_idx]
         for idx, landmark in enumerate(selected_landmarks):
             landmark += selected_anchors[idx]
         selected_landmarks *= scale
         selected_landmarks -= pad_bias
 
-        # [
-        #   [bbox_coords, landmarks_coords, score]
-        #   ...
-        #   [bbox_coords, landmarks_coords, score]
-        # ]
         return np.c_[selected_box.reshape(-1, 4), selected_landmarks.reshape(-1, 14), selected_score.reshape(-1, 1)]
 
     def _load_anchors(self):

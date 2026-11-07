@@ -1,9 +1,15 @@
 import numpy as np
 import cv2 as cv
+import onnxruntime as ort
+
+try:
+    from .config import get_onnx_providers
+except ImportError:
+    from config import get_onnx_providers
 
 class MPHandPose:
     def __init__(self, modelPath, confThreshold=0.8, backendId=0, targetId=0):
-        self.model_path = modelPath
+        self.model_path = str(modelPath)
         self.conf_threshold = confThreshold
         self.backend_id = backendId
         self.target_id = targetId
@@ -19,11 +25,18 @@ class MPHandPose:
         self.HAND_BOX_SHIFT_VECTOR = [0, -0.1]
         self.HAND_BOX_ENLARGE_FACTOR = 1.65
 
-        self.model = cv.dnn.readNet(self.model_path)
-        if self.backend_id != 0:
-            self.model.setPreferableBackend(self.backend_id)
-        if self.target_id != 0:
-            self.model.setPreferableTarget(self.target_id)
+        # Prefer fast CUDA-accelerated ONNX Runtime session
+        try:
+            self.sess = ort.InferenceSession(self.model_path, providers=get_onnx_providers())
+            self.input_name = self.sess.get_inputs()[0].name
+            self.model = None
+        except Exception:
+            self.sess = None
+            self.model = cv.dnn.readNet(self.model_path)
+            if self.backend_id != 0:
+                self.model.setPreferableBackend(self.backend_id)
+            if self.target_id != 0:
+                self.model.setPreferableTarget(self.target_id)
 
     @property
     def name(self):
@@ -32,8 +45,9 @@ class MPHandPose:
     def setBackendAndTarget(self, backendId, targetId):
         self.backend_id = backendId
         self.target_id = targetId
-        self.model.setPreferableBackend(self.backend_id)
-        self.model.setPreferableTarget(self.target_id)
+        if self.model is not None:
+            self.model.setPreferableBackend(self.backend_id)
+            self.model.setPreferableTarget(self.target_id)
 
     def _cropAndPadFromPalm(self, image, palm_bbox, for_rotation = False):
         # shift bounding box
@@ -134,8 +148,11 @@ class MPHandPose:
         input_blob, rotated_palm_bbox, angle, rotation_matrix, pad_bias = self._preprocess(image, palm)
 
         # Forward
-        self.model.setInput(input_blob)
-        output_blob = self.model.forward(self.model.getUnconnectedOutLayersNames())
+        if self.sess is not None:
+            output_blob = self.sess.run(None, {self.input_name: input_blob})
+        else:
+            self.model.setInput(input_blob)
+            output_blob = self.model.forward(self.model.getUnconnectedOutLayersNames())
 
         # Postprocess
         results = self._postprocess(output_blob, rotated_palm_bbox, angle, rotation_matrix, pad_bias)

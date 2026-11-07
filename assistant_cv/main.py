@@ -1,17 +1,18 @@
-"""Unified Real-Time BMO Computer Vision Pipeline.
+"""Unified Real-Time BMO Computer Vision Pipeline with Lazy Mode & MQTT Bridge.
 
 Integrates:
   1. Object & Person Detection / Tracking (YOLO26s, CUDA FP16, ~30 Hz)
-  2. Face Identification (InsightFace SCRFD + ArcFace, Async Background Thread ~5 Hz)
-  3. Sign Language Recognition (OpenCV Zoo HandPose ONNX + SignNet GRU, ~30 Hz)
-  4. Real-time BMO HUD with interactive keyboard toggles and edge-triggered events.
+  2. Synchronized Face Recognition (InsightFace SCRFD + ArcFace, CUDA, Event-Driven Lazy Mode)
+  3. Hands-Free Voice Auto-Enrollment (Programmatic multi-shot collector)
+  4. Real-Time Sign Language Recognition (OpenCV Zoo HandPose + SignNet GRU, Async Worker)
+  5. Short-Term Visual Memory (Rolling window context for TTS / LLM integration)
+  6. Real-Time MQTT JSON Bridge (Sub-millisecond TCP_NODELAY command & event streaming)
+  7. Sleek BMO HUD with interactive controls and status overlays.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
-import os
 import pathlib
 import sys
 import threading
@@ -24,48 +25,62 @@ import numpy as np
 try:
     from . import hud
     from .config import (
+        AUTO_ENROLL_SHOTS,
         CAM_INDEX,
         DEVICE,
         FACE_TAU,
-        GALLERY_DIR,
-        OBJ_CONF,
+        LAZY_MODE_DEFAULT,
+        MAX_FPS,
+        MEMORY_WINDOW_SEC,
+        MQTT_HOST,
+        MQTT_PORT,
         SEQ_LEN,
         SIGN_CONF,
-        SIGN_MODEL_PATH,
     )
-    from .faces import FaceIdentifier, get_face_app
-    from .live_sign import SignRecognizer, get_recognizer
-    from .objects import ObjectDetector, get_detector
+    from .enroll import AutoEnrollSession, AutoObjectEnrollSession
+    from .faces import FaceIdentifier
+    from .hands import has_palms
+    from .live_sign import get_recognizer
+    from .memory import PersonFaceSynchronizer, ShortTermMemory
+    from .mqtt_bridge import MQTTBridge
+    from .objects import get_detector
 except ImportError:
-    # Fallback when executed as standalone script
     parent_dir = str(pathlib.Path(__file__).resolve().parent.parent)
     if parent_dir not in sys.path:
         sys.path.insert(0, parent_dir)
     import hud
     from config import (
+        AUTO_ENROLL_SHOTS,
         CAM_INDEX,
         DEVICE,
         FACE_TAU,
-        GALLERY_DIR,
-        OBJ_CONF,
+        LAZY_MODE_DEFAULT,
+        MAX_FPS,
+        MEMORY_WINDOW_SEC,
+        MQTT_HOST,
+        MQTT_PORT,
         SEQ_LEN,
         SIGN_CONF,
-        SIGN_MODEL_PATH,
     )
-    from faces import FaceIdentifier, get_face_app
-    from live_sign import SignRecognizer, get_recognizer
-    from objects import ObjectDetector, get_detector
+    from enroll import AutoEnrollSession, AutoObjectEnrollSession
+    from faces import FaceIdentifier
+    from hands import has_palms
+    from live_sign import get_recognizer
+    from memory import PersonFaceSynchronizer, ShortTermMemory
+    from mqtt_bridge import MQTTBridge
+    from objects import get_detector
 
 
 # ---------------------------------------------------------------------------
 # Threaded Camera
 # ---------------------------------------------------------------------------
 class Camera:
-    """Threaded OpenCV video capture to prevent frame buffer lag."""
+    """Threaded OpenCV video capture to eliminate frame buffer lag."""
 
     def __init__(self, cam_index: int = CAM_INDEX) -> None:
         self.cam_index = cam_index
         self.cap = cv.VideoCapture(cam_index)
+        self.cap.set(cv.CAP_PROP_FPS, MAX_FPS)
         self.lock = threading.Lock()
         self.running = False
         self.ok = False
@@ -79,14 +94,20 @@ class Camera:
             self.thread.start()
 
     def _reader_loop(self) -> None:
+        frame_interval = 1.0 / MAX_FPS
         while self.running and self.cap.isOpened():
+            t0 = time.perf_counter()
             ok, frame = self.cap.read()
             if not ok:
-                time.sleep(0.01)
+                time.sleep(0.005)
                 continue
             with self.lock:
                 self.ok = ok
                 self.frame = frame
+            elapsed = time.perf_counter() - t0
+            sleep_needed = frame_interval - elapsed
+            if sleep_needed > 0.001:
+                time.sleep(sleep_needed)
 
     def read(self) -> tuple[bool, np.ndarray | None]:
         with self.lock:
@@ -105,21 +126,24 @@ class Camera:
 
 
 # ---------------------------------------------------------------------------
-# Asynchronous Face ID Worker (5 Hz)
+# Asynchronous Face ID & Auto-Enroll Worker (Lazy Event-Driven)
 # ---------------------------------------------------------------------------
 class AsyncFaceWorker:
-    """Runs Face ID in a background thread so ~300ms face latency never stalls the 30 Hz loop."""
+    """Event-driven Face Recognition and Auto-Enroll worker that sleeps when idle."""
 
-    def __init__(self, tau: float = FACE_TAU, period: float = 0.20) -> None:
+    def __init__(self, tau: float = FACE_TAU) -> None:
         self.tau = tau
-        self.period = period
         self.identifier = FaceIdentifier()
         self.lock = threading.Lock()
+        self.wake_event = threading.Event()
         self.running = False
         self.latest_frame: np.ndarray | None = None
         self.faces: list[tuple[str, float, tuple[int, int, int, int]]] = []
         self.last_latency_ms: float = 0.0
         self.thread: threading.Thread | None = None
+
+        # Auto-enrollment session
+        self.auto_enroll_session: AutoEnrollSession | None = None
 
     def start(self) -> None:
         self.running = True
@@ -127,52 +151,248 @@ class AsyncFaceWorker:
         self.thread.start()
 
     def submit_frame(self, frame: np.ndarray) -> None:
+        """Submit a frame and immediately wake the worker thread."""
         with self.lock:
             self.latest_frame = frame
+        self.wake_event.set()
 
-    def get_results(self) -> tuple[list[tuple[str, float, tuple[int, int, int, int]]], float]:
+    def set_enroll_session(self, session: AutoEnrollSession | None) -> None:
         with self.lock:
-            return list(self.faces), self.last_latency_ms
+            self.auto_enroll_session = session
+        if session is not None:
+            self.wake_event.set()
+
+    def get_results(self) -> tuple[list[tuple[str, float, tuple[int, int, int, int]]], float, dict[str, Any] | None]:
+        """Return (faces, latency_ms, enroll_info_dict_or_None)."""
+        with self.lock:
+            enroll_info = None
+            if self.auto_enroll_session is not None:
+                enroll_info = {
+                    "name": self.auto_enroll_session.name,
+                    "shots": len(self.auto_enroll_session.embeddings),
+                    "target": self.auto_enroll_session.target_shots,
+                    "msg": self.auto_enroll_session.status_msg,
+                    "completed": self.auto_enroll_session.completed,
+                    "failed": self.auto_enroll_session.failed,
+                    "already_registered": getattr(self.auto_enroll_session, "already_registered", False),
+                    "already_registered_as": getattr(self.auto_enroll_session, "already_registered_as", None),
+                }
+            return list(self.faces), self.last_latency_ms, enroll_info
 
     def reload_gallery(self) -> int:
         return self.identifier.reload_gallery()
 
     def _worker_loop(self) -> None:
         while self.running:
-            t0 = time.perf_counter()
+            # Sleep until woken up by submit_frame or enroll request
+            woken = self.wake_event.wait(timeout=0.5)
+            if not self.running:
+                break
+            if not woken:
+                continue
+
+            self.wake_event.clear()
             frame_to_process = None
+            session = None
+
             with self.lock:
                 if self.latest_frame is not None:
                     frame_to_process = self.latest_frame
                     self.latest_frame = None
+                session = self.auto_enroll_session
 
             if frame_to_process is not None:
+                t0 = time.perf_counter()
                 try:
-                    res = self.identifier.identify(frame_to_process, tau=self.tau)
+                    raw_faces = self.identifier.app.get(frame_to_process)
                     lat = (time.perf_counter() - t0) * 1000.0
+
+                    # Handle auto-enrollment stepping
+                    if session is not None and not (session.completed or session.failed):
+                        session.step(raw_faces)
+                        if session.completed:
+                            self.identifier.reload_gallery()
+
+                    # Match detected faces against gallery
+                    res: list[tuple[str, float, tuple[int, int, int, int]]] = []
+                    for f in raw_faces:
+                        name = "unknown"
+                        score = 0.0
+                        if self.identifier._gallery_names and self.identifier._gallery_matrix.shape[0] > 0:
+                            emb = np.asarray(f.normed_embedding, dtype=np.float32).reshape(-1)
+                            norm_val = float(np.linalg.norm(emb))
+                            if norm_val > 1e-8:
+                                emb = emb / norm_val
+                            sims = self.identifier._gallery_matrix @ emb
+                            best_idx = int(np.argmax(sims))
+                            score = float(sims[best_idx])
+                            name = self.identifier._gallery_names[best_idx]
+
+                        bbox_coords = tuple(f.bbox.astype(int).tolist())
+                        bbox: tuple[int, int, int, int] = (
+                            int(bbox_coords[0]),
+                            int(bbox_coords[1]),
+                            int(bbox_coords[2]),
+                            int(bbox_coords[3]),
+                        )
+                        res.append((name if score >= self.tau else "unknown", round(float(score), 3), bbox))
+
                     with self.lock:
                         self.faces = res
                         self.last_latency_ms = lat
+                        if session is not None and (session.completed or session.failed):
+                            # Retain session for one frame then clear
+                            pass
                 except Exception as exc:
                     print(f"[FaceWorker] Inference error: {exc}", file=sys.stderr)
 
-            elapsed = time.perf_counter() - t0
-            sleep_time = max(0.01, self.period - elapsed)
-            time.sleep(sleep_time)
-
     def stop(self) -> None:
         self.running = False
+        self.wake_event.set()
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=0.5)
 
 
 # ---------------------------------------------------------------------------
-# Edge-Triggered Event Detector
+# Asynchronous Sign Language Worker (Lazy Event-Driven)
 # ---------------------------------------------------------------------------
-class EventDetector:
-    """Detects transitions and emits formatted events for ESP32/serial communication."""
+class AsyncSignWorker:
+    """Async Sign Language worker running lazy palm probing and 30 Hz recognition."""
+
+    MODE_SLEEP = "SLEEP"
+    MODE_PROBE = "PROBE"
+    MODE_ACTIVE = "ACTIVE"
 
     def __init__(self) -> None:
+        self.recognizer = get_recognizer()
+        self.lock = threading.Lock()
+        self.wake_event = threading.Event()
+        self.running = False
+        self.latest_frame: np.ndarray | None = None
+        self.mode = self.MODE_SLEEP
+        self.force_active = False
+
+        self.active_sign: str | None = None
+        self.active_conf: float = 0.0
+        self.buf_len: int = 0
+        self.raw_hands: np.ndarray | None = None
+        self.last_latency_ms: float = 0.0
+        self.last_hand_seen_time: float = 0.0
+        self.last_probe_time: float = 0.0
+
+        self.thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self.running = True
+        self.thread = threading.Thread(target=self._worker_loop, daemon=True)
+        self.thread.start()
+
+    def submit_frame(self, frame: np.ndarray, person_present: bool = False, force: bool = False) -> None:
+        """Submit frame and update target activity mode."""
+        with self.lock:
+            self.latest_frame = frame
+            self.force_active = force
+            if force:
+                self.mode = self.MODE_ACTIVE
+            elif person_present:
+                if self.mode == self.MODE_SLEEP:
+                    self.mode = self.MODE_PROBE
+            else:
+                if self.mode == self.MODE_PROBE:
+                    self.mode = self.MODE_SLEEP
+
+        self.wake_event.set()
+
+    def get_results(self) -> tuple[str | None, float, int, np.ndarray | None, float, str]:
+        """Return (sign, conf, buf_len, raw_hands, latency_ms, mode)."""
+        with self.lock:
+            return (
+                self.active_sign,
+                self.active_conf,
+                self.buf_len,
+                self.raw_hands,
+                self.last_latency_ms,
+                self.mode,
+            )
+
+    def _worker_loop(self) -> None:
+        while self.running:
+            self.wake_event.wait(timeout=0.3)
+            if not self.running:
+                break
+
+            frame_to_process = None
+            cur_mode = self.MODE_SLEEP
+            with self.lock:
+                if self.latest_frame is not None:
+                    frame_to_process = self.latest_frame
+                    self.latest_frame = None
+                cur_mode = self.mode
+
+            if cur_mode == self.MODE_SLEEP or frame_to_process is None:
+                self.wake_event.clear()
+                continue
+
+            t0 = time.perf_counter()
+            now = time.time()
+
+            try:
+                if cur_mode == self.MODE_PROBE:
+                    # Probe for candidate palms at ~4 Hz
+                    if now - self.last_probe_time >= 0.22:
+                        self.last_probe_time = now
+                        if has_palms(frame_to_process):
+                            with self.lock:
+                                self.mode = self.MODE_ACTIVE
+                                self.last_hand_seen_time = now
+                    with self.lock:
+                        self.active_sign = None
+                        self.active_conf = 0.0
+                        self.buf_len = 0
+                        self.raw_hands = None
+                        self.last_latency_ms = (time.perf_counter() - t0) * 1000.0
+
+                elif cur_mode == self.MODE_ACTIVE:
+                    # Full 30 Hz sign language recognition step
+                    sign, conf, blen, hands = self.recognizer.step(frame_to_process)
+                    lat = (time.perf_counter() - t0) * 1000.0
+
+                    hand_detected = bool(hands is not None and np.any(hands))
+                    if hand_detected:
+                        self.last_hand_seen_time = now
+
+                    # If no hands detected for 1.5s and not forced, fall back to PROBE
+                    new_mode = self.MODE_ACTIVE
+                    if not self.force_active and (now - self.last_hand_seen_time > 1.5):
+                        new_mode = self.MODE_PROBE
+                        self.recognizer.reset()
+
+                    with self.lock:
+                        self.active_sign = sign
+                        self.active_conf = conf
+                        self.buf_len = blen
+                        self.raw_hands = hands
+                        self.last_latency_ms = lat
+                        self.mode = new_mode
+
+            except Exception as exc:
+                print(f"[SignWorker] Inference error: {exc}", file=sys.stderr)
+
+    def stop(self) -> None:
+        self.running = False
+        self.wake_event.set()
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=0.5)
+
+
+# ---------------------------------------------------------------------------
+# Edge-Triggered Event Detector with Bridge Forwarding
+# ---------------------------------------------------------------------------
+class EventDetector:
+    """Detects transitions and emits structured events for MQTT / Console."""
+
+    def __init__(self, mqtt_bridge: MQTTBridge | None = None) -> None:
+        self.mqtt_bridge = mqtt_bridge
         self.prev_person_count = 0
         self.prev_known_faces: set[str] = set()
         self.prev_sign: str | None = None
@@ -195,7 +415,12 @@ class EventDetector:
             diff = curr_person_count - self.prev_person_count
             ev = f"[{now_str}] Person entered (+{diff})"
             new_events.append(ev)
-            self._emit_json("person_detected", {"count": curr_person_count, "diff": diff})
+            self._emit("person_detected", {"count": curr_person_count, "diff": diff})
+        elif curr_person_count < self.prev_person_count:
+            diff = self.prev_person_count - curr_person_count
+            ev = f"[{now_str}] Person left (-{diff})"
+            new_events.append(ev)
+            self._emit("person_left", {"count": curr_person_count, "diff": diff})
         self.prev_person_count = curr_person_count
 
         # 2. Face recognition event
@@ -203,14 +428,14 @@ class EventDetector:
         for name in curr_known - self.prev_known_faces:
             ev = f"[{now_str}] Face recognized: {name}"
             new_events.append(ev)
-            self._emit_json("face_identified", {"name": name})
+            self._emit("face_identified", {"name": name})
         self.prev_known_faces = curr_known
 
         # 3. Sign recognition event
         if sign and sign != self.prev_sign and sign.lower() != "none":
             ev = f"[{now_str}] Sign: {sign.upper()} ({sign_conf*100:.0f}%)"
             new_events.append(ev)
-            self._emit_json("sign_recognized", {"sign": sign, "conf": round(sign_conf, 2)})
+            self._emit("sign_recognized", {"sign": sign, "conf": round(sign_conf, 2)})
         self.prev_sign = sign
 
         for e in new_events:
@@ -220,9 +445,11 @@ class EventDetector:
 
         return new_events
 
-    def _emit_json(self, event_type: str, data: dict[str, Any]) -> None:
+    def _emit(self, event_type: str, data: dict[str, Any]) -> None:
         payload = {"event": event_type, "timestamp": time.time(), "data": data}
-        print(f"[EVENT] {json.dumps(payload)}", flush=True)
+        if self.mqtt_bridge is not None:
+            self.mqtt_bridge.publish_event(event_type, data)
+        print(f"[EVENT] {payload}", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -233,38 +460,61 @@ def run_pipeline(
     headless: bool = False,
     max_frames: int | None = None,
     mirror: bool = False,
+    lazy: bool = LAZY_MODE_DEFAULT,
+    mqtt_host: str = MQTT_HOST,
+    mqtt_port: int = MQTT_PORT,
+    enable_mqtt: bool = True,
 ) -> dict[str, Any]:
-    """Run the unified multi-rate vision pipeline with HUD and event emission."""
-    print("=" * 65)
-    print("  BMO Computer Vision System — Unified Pipeline")
-    print(f"  Device: {DEVICE.upper()} | Camera: {cam_index} | Headless: {headless}")
-    print("=" * 65)
+    """Run the unified multi-rate vision pipeline with Lazy Mode and MQTT bridge."""
+    print("=" * 68)
+    print("  BMO Computer Vision System — Unified Pipeline (Lazy Mode & MQTT)")
+    print(f"  Device: {DEVICE.upper()} | Camera: {cam_index} | Lazy Mode: {lazy}")
+    print(f"  MQTT Bridge: {'ENABLED (' + mqtt_host + ':' + str(mqtt_port) + ')' if enable_mqtt else 'DISABLED'}")
+    print("=" * 68)
 
-    # Initialize models
-    print("[1/3] Loading YOLO26s Object Detector...")
+    # Initialize MQTT Bridge
+    mqtt_bridge: MQTTBridge | None = None
+    if enable_mqtt:
+        mqtt_bridge = MQTTBridge(host=mqtt_host, port=mqtt_port)
+        mqtt_bridge.start()
+
+    # Initialize Core Components
+    print("[1/4] Loading YOLO26s Object & Person Detector...")
     obj_detector = get_detector()
-    print("[2/3] Initializing Async Face Worker (buffalo_s)...")
+
+    print("[2/4] Initializing Event-Driven Async Face Worker (SCRFD + ArcFace)...")
     face_worker = AsyncFaceWorker()
     face_worker.start()
-    print("[3/3] Initializing Standalone Sign Recognizer...")
-    sign_recognizer = get_recognizer()
 
-    event_detector = EventDetector()
+    print("[3/4] Initializing Event-Driven Async Sign Worker...")
+    sign_worker = AsyncSignWorker()
+    sign_worker.start()
+
+    print("[4/4] Initializing Person-Face Synchronizer & Short-Term Memory...")
+    synchronizer = PersonFaceSynchronizer(registry=face_worker.identifier.registry)
+    short_term_memory = ShortTermMemory(window_sec=MEMORY_WINDOW_SEC, registry=face_worker.identifier.registry)
+    event_detector = EventDetector(mqtt_bridge=mqtt_bridge)
+
     events_log: list[str] = ["BMO Vision Pipeline Started"]
+    auto_enroll_session: AutoEnrollSession | None = None
+    auto_object_enroll_session: AutoObjectEnrollSession | None = None
 
     # Active runtime toggles
     toggles = {
         "1:OBJ": True,
         "2:FACE": True,
         "3:SIGN": True,
-        "P:PERS": False,
-        "T:TRK": False,
+        "L:LAZY": lazy,
+        "T:TRK": True,  # Keep tracking enabled for person track IDs
     }
 
     camera = Camera(cam_index=cam_index)
     if not camera.is_opened():
         print(f"[ERROR] Failed to open camera device /dev/video{cam_index}.", file=sys.stderr)
         face_worker.stop()
+        sign_worker.stop()
+        if mqtt_bridge:
+            mqtt_bridge.stop()
         return {"error": "Camera open failure"}
 
     fps: float = 0.0
@@ -272,19 +522,21 @@ def run_pipeline(
     frame_count = 0
     start_time = time.perf_counter()
 
-    # Latencies
     obj_latency: float = 0.0
-    sign_latency: float = 0.0
+    last_context_pub_time = 0.0
 
     print("\nInteractive Hotkeys:")
     print("  1 / 2 / 3 : Toggle Objects, Face ID, or Sign Language modules")
-    print("  p / t     : Toggle Persons-only filter / Object Tracking")
-    print("  r         : Hot-reload face gallery and sign model")
+    print("  l         : Toggle Lazy Mode (sleep idle workers)")
+    print("  e         : Trigger hands-free auto-enrollment for 'User'")
+    print("  o         : Register / enroll new object held in view")
+    print("  r         : Hot-reload face & object galleries")
     print("  m         : Toggle mirror mode")
     print("  q / ESC   : Quit\n")
 
     try:
         while camera.is_opened():
+            t_cycle_start = time.perf_counter()
             ok, frame = camera.read()
             if not ok or frame is None:
                 time.sleep(0.005)
@@ -299,32 +551,292 @@ def run_pipeline(
             t_prev = t_now
             fps = 0.9 * fps + 0.1 * (1.0 / dt) if fps > 0.0 else (1.0 / dt)
 
-            # 1. Objects module (~30 Hz)
-            detections = []
+            # ---------------------------------------------------------------
+            # 1. Process Incoming MQTT Commands
+            # ---------------------------------------------------------------
+            if mqtt_bridge is not None:
+                for cmd in mqtt_bridge.poll_commands():
+                    cmd_type = str(cmd.get("command", "")).lower()
+                    req_id = cmd.get("request_id")
+
+                    if cmd_type in ("enroll_person", "save_person", "remember_person"):
+                        target_name = str(cmd.get("name", "User")).strip()
+                        target_shots = int(cmd.get("shots", AUTO_ENROLL_SHOTS))
+                        auto_enroll_session = AutoEnrollSession(
+                            name=target_name,
+                            target_shots=target_shots,
+                            identifier=face_worker.identifier,
+                        )
+                        face_worker.set_enroll_session(auto_enroll_session)
+                        msg = f"Starting auto-enroll for '{target_name}'"
+                        events_log.append(msg)
+                        mqtt_bridge.publish_response(cmd_type, "started", {"name": target_name}, req_id)
+
+                    elif cmd_type == "get_context":
+                        ctx_snapshot = short_term_memory.get_llm_context()
+                        mqtt_bridge.publish_context(ctx_snapshot, request_id=req_id)
+                        mqtt_bridge.publish_response(cmd_type, "success", {"context": ctx_snapshot}, req_id)
+
+                    elif cmd_type == "set_mode":
+                        new_mode = str(cmd.get("mode", "")).lower()
+                        if new_mode == "lazy":
+                            toggles["L:LAZY"] = True
+                        elif new_mode in ("all", "active"):
+                            toggles["L:LAZY"] = False
+                            toggles["1:OBJ"] = toggles["2:FACE"] = toggles["3:SIGN"] = True
+                        elif new_mode == "idle":
+                            toggles["2:FACE"] = toggles["3:SIGN"] = False
+                        mqtt_bridge.publish_response(cmd_type, "applied", {"mode": new_mode}, req_id)
+
+                    elif cmd_type == "status":
+                        status_data = {
+                            "fps": round(fps, 1),
+                            "lazy_mode": toggles["L:LAZY"],
+                            "toggles": toggles,
+                            "persons_in_view": len(short_term_memory.current_persons),
+                        }
+                        mqtt_bridge.publish_response(cmd_type, "ok", status_data, req_id)
+
+                    elif cmd_type in ("delete_person", "forget_person"):
+                        del_name = str(cmd.get("name", "")).strip()
+                        if not del_name:
+                            mqtt_bridge.publish_response(cmd_type, "error", {"error": "Missing person name"}, req_id)
+                        else:
+                            ok = face_worker.identifier.delete_identity(del_name)
+                            if ok:
+                                events_log.append(f"Deleted identity: {del_name}")
+                                mqtt_bridge.publish_response(cmd_type, "success", {"name": del_name}, req_id)
+                            else:
+                                mqtt_bridge.publish_response(cmd_type, "not_found", {"name": del_name, "error": f"Person '{del_name}' not found"}, req_id)
+
+                    elif cmd_type == "rename_person":
+                        old_name = str(cmd.get("old_name", "")).strip()
+                        new_name = str(cmd.get("new_name", "")).strip()
+                        if not old_name or not new_name:
+                            mqtt_bridge.publish_response(cmd_type, "error", {"error": "Missing old_name or new_name"}, req_id)
+                        else:
+                            ok = face_worker.identifier.rename_identity(old_name, new_name)
+                            if ok:
+                                events_log.append(f"Renamed '{old_name}' -> '{new_name}'")
+                                mqtt_bridge.publish_response(cmd_type, "success", {"old_name": old_name, "new_name": new_name}, req_id)
+                            else:
+                                mqtt_bridge.publish_response(cmd_type, "error", {"error": f"Failed to rename '{old_name}'"}, req_id)
+
+                    elif cmd_type in ("list_persons", "list_identities", "get_roster"):
+                        roster = face_worker.identifier.registry.list_identities()
+                        mqtt_bridge.publish_response(cmd_type, "success", {"persons": roster, "count": len(roster)}, req_id)
+
+                    elif cmd_type == "set_object_classes":
+                        classes = cmd.get("classes")
+                        if isinstance(classes, (list, tuple)) and classes:
+                            new_classes = [str(c).strip() for c in classes if str(c).strip()]
+                            obj_detector.set_classes(new_classes)
+                            events_log.append(f"Classes updated ({len(new_classes)} items)")
+                            mqtt_bridge.publish_response(cmd_type, "success", {"classes": new_classes}, req_id)
+                        else:
+                            mqtt_bridge.publish_response(cmd_type, "error", {"error": "Missing or invalid classes list"}, req_id)
+
+                    elif cmd_type in ("recheck_face", "reverify_face"):
+                        track_id = cmd.get("track_id")
+                        if track_id is not None:
+                            try:
+                                track_id = int(track_id)
+                            except (TypeError, ValueError):
+                                track_id = None
+                        synchronizer.flag_for_recheck(track_id)
+                        events_log.append(f"Flagged recheck ({track_id if track_id is not None else 'all'})")
+                        mqtt_bridge.publish_response(cmd_type, "success", {"flagged_track": track_id}, req_id)
+
+                    elif cmd_type in ("register_object", "enroll_object", "save_object"):
+                        target_name = str(cmd.get("name", "")).strip()
+                        if not target_name:
+                            mqtt_bridge.publish_response(cmd_type, "error", {"error": "Missing object name"}, req_id)
+                        else:
+                            shots = int(cmd.get("shots", 6))
+                            synonyms = cmd.get("synonyms")
+                            if isinstance(synonyms, (list, tuple)):
+                                syns = [str(s).strip() for s in synonyms if str(s).strip()]
+                            else:
+                                syns = []
+                            if shots <= 0:
+                                obj_detector.register_class(target_name, syns)
+                                events_log.append(f"Registered object class: {target_name}")
+                                mqtt_bridge.publish_response(cmd_type, "success", {"name": target_name, "mode": "text"}, req_id)
+                            else:
+                                auto_object_enroll_session = AutoObjectEnrollSession(
+                                    name=target_name,
+                                    target_shots=shots,
+                                    synonyms=syns,
+                                    detector=obj_detector,
+                                    registry=obj_detector.registry,
+                                )
+                                events_log.append(f"Started object enroll for '{target_name}'")
+                                mqtt_bridge.publish_response(cmd_type, "started", {"name": target_name, "shots": shots}, req_id)
+
+                    elif cmd_type in ("delete_object", "forget_object"):
+                        target_name = str(cmd.get("name", "")).strip()
+                        if not target_name:
+                            mqtt_bridge.publish_response(cmd_type, "error", {"error": "Missing object name"}, req_id)
+                        else:
+                            ok, msg = obj_detector.registry.delete_object(target_name)
+                            if ok:
+                                obj_detector.reload_classes()
+                                events_log.append(f"Deleted object: {target_name}")
+                                mqtt_bridge.publish_response(cmd_type, "success", {"name": target_name}, req_id)
+                            else:
+                                mqtt_bridge.publish_response(cmd_type, "not_found", {"name": target_name, "error": msg}, req_id)
+
+                    elif cmd_type == "rename_object":
+                        old_name = str(cmd.get("old_name", "")).strip()
+                        new_name = str(cmd.get("new_name", "")).strip()
+                        if not old_name or not new_name:
+                            mqtt_bridge.publish_response(cmd_type, "error", {"error": "Missing old_name or new_name"}, req_id)
+                        else:
+                            ok, msg = obj_detector.registry.rename_object(old_name, new_name)
+                            if ok:
+                                obj_detector.reload_classes()
+                                events_log.append(f"Renamed object: '{old_name}' -> '{new_name}'")
+                                mqtt_bridge.publish_response(cmd_type, "success", {"old_name": old_name, "new_name": new_name}, req_id)
+                            else:
+                                mqtt_bridge.publish_response(cmd_type, "error", {"error": msg}, req_id)
+
+                    elif cmd_type in ("list_objects", "get_objects"):
+                        roster = obj_detector.registry.list_objects()
+                        mqtt_bridge.publish_response(cmd_type, "success", {"objects": roster, "count": len(roster)}, req_id)
+
+            # ---------------------------------------------------------------
+            # 2. Objects & Person Detection (~30 Hz)
+            # ---------------------------------------------------------------
+            detections: list[dict[str, Any]] = []
             if toggles["1:OBJ"]:
                 t_obj0 = time.perf_counter()
                 detections = obj_detector.detect(
                     frame,
-                    persons_only=toggles["P:PERS"],
+                    persons_only=False,
                     track=toggles["T:TRK"],
                 )
                 obj_latency = (time.perf_counter() - t_obj0) * 1000.0
 
-            # 2. Face ID module (~5 Hz async submission)
+            # Step active object enrollment session if running
+            object_enroll_info: dict[str, Any] | None = None
+            if auto_object_enroll_session is not None:
+                auto_object_enroll_session.step(frame, detections)
+                object_enroll_info = {
+                    "name": auto_object_enroll_session.name,
+                    "shots": len(auto_object_enroll_session.embeddings),
+                    "target": auto_object_enroll_session.target_shots,
+                    "msg": auto_object_enroll_session.status_msg,
+                    "completed": auto_object_enroll_session.completed,
+                    "failed": auto_object_enroll_session.failed,
+                    "already_registered": auto_object_enroll_session.already_registered,
+                    "target_bbox": auto_object_enroll_session.last_target_bbox,
+                }
+                if auto_object_enroll_session.completed:
+                    msg = f"Enrolled object '{auto_object_enroll_session.name}' successfully!"
+                    events_log.append(msg)
+                    event_detector._emit("object_enrolled", {"name": auto_object_enroll_session.name})
+                    if mqtt_bridge:
+                        mqtt_bridge.publish_response(
+                            "register_object",
+                            "completed",
+                            {"name": auto_object_enroll_session.name},
+                        )
+                    auto_object_enroll_session = None
+                elif auto_object_enroll_session.failed:
+                    msg = f"Object enroll failed: {auto_object_enroll_session.error_msg}"
+                    events_log.append(msg)
+                    if mqtt_bridge:
+                        mqtt_bridge.publish_response(
+                            "register_object",
+                            "failed",
+                            {"error": auto_object_enroll_session.error_msg},
+                        )
+                    auto_object_enroll_session = None
+
+            persons = [d for d in detections if str(d.get("label", "")).lower() == "person"]
+            person_present = len(persons) > 0
+
+            # ---------------------------------------------------------------
+            # 3. Face ID Orchestrator (Lazy or Continuous)
+            # ---------------------------------------------------------------
+            needs_face = False
             if toggles["2:FACE"]:
-                face_worker.submit_frame(frame)
-            faces, face_latency = face_worker.get_results() if toggles["2:FACE"] else ([], 0.0)
+                if auto_enroll_session is not None and not (auto_enroll_session.completed or auto_enroll_session.failed):
+                    needs_face = True
+                elif not toggles["L:LAZY"]:
+                    needs_face = True
+                elif person_present:
+                    needs_face = synchronizer.needs_face_recognition(persons)
 
-            # 3. Sign Language module (~30 Hz)
-            active_sign, active_conf, buf_len, raw_hands = None, 0.0, 0, None
+                if needs_face:
+                    face_worker.submit_frame(frame)
+
+            faces, face_lat, enroll_info = face_worker.get_results() if toggles["2:FACE"] else ([], 0.0, None)
+
+            # Check if auto-enroll finished
+            if auto_enroll_session is not None:
+                if auto_enroll_session.completed:
+                    msg = f"Enrolled {auto_enroll_session.name} successfully!"
+                    events_log.append(msg)
+                    event_detector._emit("person_enrolled", {"name": auto_enroll_session.name})
+                    if mqtt_bridge:
+                        mqtt_bridge.publish_response("enroll_person", "completed", {"name": auto_enroll_session.name})
+                    face_worker.set_enroll_session(None)
+                    auto_enroll_session = None
+                elif auto_enroll_session.failed:
+                    if getattr(auto_enroll_session, "already_registered", False):
+                        reg_as = getattr(auto_enroll_session, "already_registered_as", "existing identity")
+                        msg = f"Auto-enroll aborted: Already registered as '{reg_as}'"
+                        events_log.append(msg)
+                        if mqtt_bridge:
+                            mqtt_bridge.publish_response(
+                                "enroll_person",
+                                "already_registered",
+                                {
+                                    "name": auto_enroll_session.name,
+                                    "registered_as": reg_as,
+                                    "error": auto_enroll_session.error_msg,
+                                },
+                            )
+                    else:
+                        msg = f"Auto-enroll failed: {auto_enroll_session.error_msg}"
+                        events_log.append(msg)
+                        if mqtt_bridge:
+                            mqtt_bridge.publish_response(
+                                "enroll_person",
+                                "failed",
+                                {"error": auto_enroll_session.error_msg},
+                            )
+                    face_worker.set_enroll_session(None)
+                    auto_enroll_session = None
+
+            # ---------------------------------------------------------------
+            # 4. Sign Language Orchestrator (Lazy Probe or Continuous)
+            # ---------------------------------------------------------------
             if toggles["3:SIGN"]:
-                t_sign0 = time.perf_counter()
-                active_sign, active_conf, buf_len, raw_hands = sign_recognizer.step(frame)
-                sign_latency = (time.perf_counter() - t_sign0) * 1000.0
+                force_sign = not toggles["L:LAZY"]
+                sign_worker.submit_frame(frame, person_present=person_present, force=force_sign)
 
-            # 4. Check for state transition events
+            active_sign, active_conf, buf_len, raw_hands, sign_lat, sign_mode = (
+                sign_worker.get_results() if toggles["3:SIGN"] else (None, 0.0, 0, None, 0.0, "OFF")
+            )
+
+            # ---------------------------------------------------------------
+            # 5. Synchronize Person Tracks with Face Identities
+            # ---------------------------------------------------------------
+            synced_objects = synchronizer.sync(detections, faces)
+
+            # ---------------------------------------------------------------
+            # 6. Update Short-Term Visual Memory & Check Events
+            # ---------------------------------------------------------------
+            short_term_memory.update(synced_objects, frame.shape)
+            if active_sign and active_conf >= SIGN_CONF:
+                # Find signer name if person is present
+                signer_name = synced_objects[0].get("identity") if synced_objects else None
+                short_term_memory.record_sign(active_sign, active_conf, signer=signer_name)
+
             new_events = event_detector.update(
-                objects=detections,
+                objects=synced_objects,
                 faces=faces,
                 sign=active_sign,
                 sign_conf=active_conf,
@@ -334,9 +846,18 @@ def run_pipeline(
                 if len(events_log) > 6:
                     events_log.pop(0)
 
-            # 5. Build unified state dict
+            # Periodic context broadcast over MQTT (every 5 seconds if someone is present)
+            now_sec = time.time()
+            if mqtt_bridge is not None and (now_sec - last_context_pub_time > 5.0):
+                if person_present or short_term_memory.current_objects:
+                    mqtt_bridge.publish_context(short_term_memory.get_llm_context())
+                    last_context_pub_time = now_sec
+
+            # ---------------------------------------------------------------
+            # 7. Build HUD State & Render
+            # ---------------------------------------------------------------
             state: dict[str, Any] = {
-                "objects": detections,
+                "objects": synced_objects,
                 "faces": faces,
                 "sign": active_sign,
                 "sign_conf": active_conf,
@@ -345,14 +866,15 @@ def run_pipeline(
                 "raw_hands": raw_hands,
                 "fps": fps,
                 "device": DEVICE,
+                "auto_enroll": enroll_info,
+                "auto_object_enroll": object_enroll_info,
                 "latencies": {
-                    "obj": obj_latency,
-                    "sign": sign_latency,
-                    "face": face_latency,
+                    "OBJ": obj_latency,
+                    f"SIGN[{sign_mode}]": sign_lat,
+                    "FACE": face_lat,
                 },
             }
 
-            # 6. Render HUD (if not headless)
             if not headless:
                 display_frame = frame.copy()
                 hud.render_hud(display_frame, state, events=events_log, toggles=toggles)
@@ -370,19 +892,43 @@ def run_pipeline(
                 elif k == ord("3"):
                     toggles["3:SIGN"] = not toggles["3:SIGN"]
                     events_log.append(f"Sign Lang: {'ON' if toggles['3:SIGN'] else 'OFF'}")
-                elif k == ord("p") or k == ord("P"):
-                    toggles["P:PERS"] = not toggles["P:PERS"]
-                    events_log.append(f"Persons Only: {'ON' if toggles['P:PERS'] else 'OFF'}")
-                elif k == ord("t") or k == ord("T"):
-                    toggles["T:TRK"] = not toggles["T:TRK"]
-                    events_log.append(f"Tracking: {'ON' if toggles['T:TRK'] else 'OFF'}")
-                elif k == ord("m") or k == ord("M"):
+                elif k in (ord("l"), ord("L")):
+                    toggles["L:LAZY"] = not toggles["L:LAZY"]
+                    events_log.append(f"Lazy Mode: {'ON' if toggles['L:LAZY'] else 'OFF'}")
+                elif k in (ord("e"), ord("E")):
+                    # Quick hotkey auto-enroll for test user
+                    auto_enroll_session = AutoEnrollSession(
+                        name="User",
+                        target_shots=AUTO_ENROLL_SHOTS,
+                        identifier=face_worker.identifier,
+                    )
+                    face_worker.set_enroll_session(auto_enroll_session)
+                    events_log.append("Started auto-enroll for 'User'")
+                elif k in (ord("o"), ord("O")):
+                    # Quick hotkey auto-enroll for object held in view
+                    auto_object_enroll_session = AutoObjectEnrollSession(
+                        name="New_Item",
+                        target_shots=6,
+                        detector=obj_detector,
+                        registry=obj_detector.registry,
+                    )
+                    events_log.append("Started object enroll for 'New_Item' (hold object in view)")
+                elif k in (ord("m"), ord("M")):
                     mirror = not mirror
                     events_log.append(f"Mirror: {'ON' if mirror else 'OFF'}")
-                elif k == ord("r") or k == ord("R"):
+                elif k in (ord("r"), ord("R")):
                     count = face_worker.reload_gallery()
-                    sign_recognizer._try_load_model()
-                    events_log.append(f"Reloaded gallery ({count} faces)")
+                    obj_count = len(obj_detector.reload_classes())
+                    events_log.append(f"Reloaded galleries ({count} faces, {obj_count} object classes)")
+                elif k in (ord("f"), ord("F")):
+                    synchronizer.flag_for_recheck()
+                    events_log.append("Forced face re-check for active tracks")
+
+            # Enforce 60 FPS cap
+            cycle_elapsed = time.perf_counter() - t_cycle_start
+            sleep_needed = (1.0 / MAX_FPS) - cycle_elapsed
+            if sleep_needed > 0.001:
+                time.sleep(sleep_needed)
 
             if max_frames and frame_count >= max_frames:
                 break
@@ -390,11 +936,14 @@ def run_pipeline(
     finally:
         total_time = max(1e-6, time.perf_counter() - start_time)
         avg_fps = frame_count / total_time
-        print("\n" + "=" * 65)
+        print("\n" + "=" * 68)
         print(f"  Session Finished: {frame_count} frames in {total_time:.2f}s ({avg_fps:.1f} FPS)")
-        print("=" * 65)
+        print("=" * 68)
         face_worker.stop()
+        sign_worker.stop()
         camera.release()
+        if mqtt_bridge is not None:
+            mqtt_bridge.stop()
         if not headless:
             cv.destroyAllWindows()
 
@@ -412,6 +961,10 @@ def main() -> None:
     parser.add_argument("--headless", action="store_true", help="Run without graphical HUD")
     parser.add_argument("--frames", type=int, default=None, help="Stop after N frames (benchmark)")
     parser.add_argument("--mirror", action="store_true", help="Mirror webcam view")
+    parser.add_argument("--no-lazy", action="store_true", help="Disable Lazy Mode (run all models continuously)")
+    parser.add_argument("--no-mqtt", action="store_true", help="Disable MQTT bridge")
+    parser.add_argument("--mqtt-host", type=str, default=MQTT_HOST, help=f"MQTT broker host (default: {MQTT_HOST})")
+    parser.add_argument("--mqtt-port", type=int, default=MQTT_PORT, help=f"MQTT broker port (default: {MQTT_PORT})")
     args = parser.parse_args()
 
     run_pipeline(
@@ -419,6 +972,10 @@ def main() -> None:
         headless=args.headless,
         max_frames=args.frames,
         mirror=args.mirror,
+        lazy=not args.no_lazy,
+        mqtt_host=args.mqtt_host,
+        mqtt_port=args.mqtt_port,
+        enable_mqtt=not args.no_mqtt,
     )
 
 
