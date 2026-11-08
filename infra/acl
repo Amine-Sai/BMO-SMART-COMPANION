@@ -2,24 +2,20 @@ user cv
 topic write bmo/vision/cmd_result
 topic write bmo/vision/context
 topic write bmo/vision/events
-topic write bmo/vision/response
 topic write bmo/vision/status
 topic read bmo/brain/status
 topic read bmo/vision/cmd
-topic read bmo/vision/command
 
 user brain
 topic write bmo/brain/say
 topic write bmo/brain/status
 topic write bmo/hw/cmd
 topic write bmo/vision/cmd
-topic write bmo/vision/command
 topic read bmo/hw/event
 topic read bmo/hw/status
 topic read bmo/vision/cmd_result
 topic read bmo/vision/context
 topic read bmo/vision/events
-topic read bmo/vision/response
 topic read bmo/vision/status
 
 user pi

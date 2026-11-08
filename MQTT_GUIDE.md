@@ -17,8 +17,8 @@ flowchart TD
     end
 
     subgraph Broker["MQTT Broker (:1883)"]
-        T_CMD["bmo/vision/command"]
-        T_RESP["bmo/vision/response"]
+        T_CMD["bmo/vision/cmd"]
+        T_RESP["bmo/vision/cmd_result"]
         T_EVT["bmo/vision/events"]
         T_CTX["bmo/vision/context"]
     end
@@ -100,7 +100,7 @@ Once your broker is running, launch BMO Vision:
 
 When connected, the pipeline prints:
 ```
-[MQTTBridge] Connected to localhost:1883, subscribed to 'bmo/vision/command'
+[MQTTBridge] Connected to localhost:1883, subscribed to 'bmo/vision/cmd'
 ```
 
 ---
@@ -135,7 +135,7 @@ mosquitto_sub -h localhost -p 1883 -t "bmo/vision/#" -v
 
 ## 5. Executing Commands Step-by-Step
 
-All commands are published to topic `bmo/vision/command` and acknowledge on `bmo/vision/response`.
+All commands are published to topic `bmo/vision/cmd` and acknowledge on `bmo/vision/cmd_result`.
 
 ### 5.1 System & Orchestration Commands
 
@@ -147,9 +147,9 @@ Queries current pipeline health, frame rate, lazy mode state, and toggle statuse
   ```
 - **mosquitto_pub**:
   ```bash
-  mosquitto_pub -h localhost -t "bmo/vision/command" -m '{"command": "status", "request_id": "req-01"}'
+  mosquitto_pub -h localhost -t "bmo/vision/cmd" -m '{"command": "status", "request_id": "req-01"}'
   ```
-- **Expected Response (`bmo/vision/response`)**:
+- **Expected Response (`bmo/vision/cmd_result`)**:
   ```json
   {
     "type": "command_response",
@@ -175,9 +175,9 @@ Queries an immediate snapshot of short-term visual memory and natural-language s
   ```
 - **mosquitto_pub**:
   ```bash
-  mosquitto_pub -h localhost -t "bmo/vision/command" -m '{"command": "get_context", "request_id": "req-02"}'
+  mosquitto_pub -h localhost -t "bmo/vision/cmd" -m '{"command": "get_context", "request_id": "req-02"}'
   ```
-- **Expected Response (`bmo/vision/response`)**:
+- **Expected Response (`bmo/vision/cmd_result`)**:
   ```json
   {
     "type": "command_response",
@@ -214,7 +214,7 @@ Switches pipeline execution state between `lazy` (models sleep when no person is
   ```
 - **mosquitto_pub**:
   ```bash
-  mosquitto_pub -h localhost -t "bmo/vision/command" -m '{"command": "set_mode", "mode": "active"}'
+  mosquitto_pub -h localhost -t "bmo/vision/cmd" -m '{"command": "set_mode", "mode": "active"}'
   ```
 - **Expected Response**:
   ```json
@@ -233,7 +233,7 @@ Initiates hands-free multi-shot face enrollment with viewpoint diversity validat
   ```
 - **mosquitto_pub**:
   ```bash
-  mosquitto_pub -h localhost -t "bmo/vision/command" -m '{"command": "enroll_person", "name": "Alice", "shots": 8}'
+  mosquitto_pub -h localhost -t "bmo/vision/cmd" -m '{"command": "enroll_person", "name": "Alice", "shots": 8}'
   ```
 - **Pipeline Behavior**:
   - The HUD displays `ENROLL: Alice (x/8)` with a progress bar.
@@ -252,7 +252,7 @@ Returns the complete roster of registered people in the biometric gallery.
   ```
 - **mosquitto_pub**:
   ```bash
-  mosquitto_pub -h localhost -t "bmo/vision/command" -m '{"command": "list_persons"}'
+  mosquitto_pub -h localhost -t "bmo/vision/cmd" -m '{"command": "list_persons"}'
   ```
 - **Expected Response**:
   ```json
@@ -279,7 +279,7 @@ Renames an enrolled person in the biometric gallery without losing their learned
   ```
 - **mosquitto_pub**:
   ```bash
-  mosquitto_pub -h localhost -t "bmo/vision/command" -m '{"command": "rename_person", "old_name": "Alice", "new_name": "Alicia"}'
+  mosquitto_pub -h localhost -t "bmo/vision/cmd" -m '{"command": "rename_person", "old_name": "Alice", "new_name": "Alicia"}'
   ```
 
 ---
@@ -292,7 +292,7 @@ Permanently removes a person from the biometric registry and deletes their embed
   ```
 - **mosquitto_pub**:
   ```bash
-  mosquitto_pub -h localhost -t "bmo/vision/command" -m '{"command": "delete_person", "name": "Alicia"}'
+  mosquitto_pub -h localhost -t "bmo/vision/cmd" -m '{"command": "delete_person", "name": "Alicia"}'
   ```
 
 ---
@@ -305,7 +305,7 @@ Forces the lazy Face ID worker to wake up and reverify the identity of a specifi
   ```
 - **mosquitto_pub**:
   ```bash
-  mosquitto_pub -h localhost -t "bmo/vision/command" -m '{"command": "recheck_face", "track_id": 1}'
+  mosquitto_pub -h localhost -t "bmo/vision/cmd" -m '{"command": "recheck_face", "track_id": 1}'
   ```
 
 ---

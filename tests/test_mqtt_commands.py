@@ -15,7 +15,7 @@ from assistant_cv.mqtt_bridge import MQTTBridge
 from assistant_cv.memory import ShortTermMemory, PersonFaceSynchronizer
 from assistant_cv.registry import IdentityRegistry, ObjectRegistry
 from tools.simple_broker import SimpleMQTTBroker
-from bmo_contracts.topics import VISION_CMD_LEGACY, VISION_RESP_LEGACY
+from bmo_contracts.topics import VISION_CMD, VISION_CMD_RESULT
 
 
 class TestMQTTBridgeUnit(unittest.TestCase):
@@ -27,7 +27,7 @@ class TestMQTTBridgeUnit(unittest.TestCase):
     def test_command_normalization(self):
         """Verify command aliases 'cmd' and 'action' are normalized to 'command'."""
         mock_msg = MagicMock()
-        mock_msg.topic = VISION_CMD_LEGACY
+        mock_msg.topic = VISION_CMD
         mock_msg.payload = b'{"cmd": "status", "request_id": "req-1"}'
         self.bridge._on_message(None, None, mock_msg)
 
@@ -212,7 +212,7 @@ class TestLiveMQTTRoundtrip(unittest.TestCase):
         test_client.on_connect = on_client_connect
         test_client.on_message = lambda _c, _u, msg: client_responses.append(json.loads(msg.payload))
         test_client.connect("127.0.0.1", self.test_port)
-        test_client.subscribe(VISION_RESP_LEGACY)
+        test_client.subscribe(VISION_CMD_RESULT)
         test_client.loop_start()
 
         self.assertTrue(client_connected.wait(timeout=2.0))
@@ -220,7 +220,7 @@ class TestLiveMQTTRoundtrip(unittest.TestCase):
 
         # 3. Publish command from agent
         cmd_payload = {"command": "status", "request_id": "test-req-001"}
-        test_client.publish(VISION_CMD_LEGACY, json.dumps(cmd_payload))
+        test_client.publish(VISION_CMD, json.dumps(cmd_payload))
 
         # Wait for command arrival
         for _ in range(30):

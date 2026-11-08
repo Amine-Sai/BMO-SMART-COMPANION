@@ -607,6 +607,7 @@ def run_pipeline(
 
     events_log: list[str] = ["BMO Vision Pipeline Started"]
     auto_enroll_session: AutoEnrollSession | None = None
+    auto_enroll_req_id: str | None = None
     auto_object_enroll_session: AutoObjectEnrollSession | None = None
 
     # Active runtime toggles
@@ -671,19 +672,42 @@ def run_pipeline(
                 for cmd in mqtt_bridge.poll_commands():
                     cmd_type = str(cmd.get("command", "")).lower()
                     req_id = cmd.get("request_id")
+                    contract_id = cmd.get("id")
+                    args_dict = cmd.get("args") if isinstance(cmd.get("args"), dict) else {}
 
-                    if cmd_type in ("enroll_person", "save_person", "remember_person"):
-                        target_name = str(cmd.get("name", "User")).strip()
-                        target_shots = int(cmd.get("shots", AUTO_ENROLL_SHOTS))
+                    if cmd_type in ("enroll", "enroll_person", "save_person", "remember_person"):
+                        target_name = str(args_dict.get("name", cmd.get("name", "User"))).strip()
+                        target_shots = int(args_dict.get("shots", cmd.get("shots", AUTO_ENROLL_SHOTS)))
                         auto_enroll_session = AutoEnrollSession(
                             name=target_name,
                             target_shots=target_shots,
                             identifier=face_worker.identifier,
                         )
+                        auto_enroll_req_id = str(contract_id) if contract_id else None
                         face_worker.set_enroll_session(auto_enroll_session)
                         msg = f"Starting auto-enroll for '{target_name}'"
                         events_log.append(msg)
-                        mqtt_bridge.publish_response(cmd_type, "started", {"name": target_name}, req_id)
+                        if not contract_id:
+                            mqtt_bridge.publish_response(cmd_type, "started", {"name": target_name}, req_id)
+
+                    elif cmd_type == "reload_gallery":
+                        reloaded_count = face_worker.reload_gallery()
+                        if contract_id:
+                            mqtt_bridge.publish_cmd_result(str(contract_id), True, f"reloaded:{reloaded_count}")
+                        else:
+                            mqtt_bridge.publish_response(cmd_type, "ok", {"count": reloaded_count}, req_id)
+
+                    elif cmd_type == "set_modules":
+                        if "objects" in args_dict:
+                            toggles["1:OBJ"] = bool(args_dict["objects"])
+                        if "face" in args_dict:
+                            toggles["2:FACE"] = bool(args_dict["face"])
+                        if "sign" in args_dict:
+                            toggles["3:SIGN"] = bool(args_dict["sign"])
+                        if contract_id:
+                            mqtt_bridge.publish_cmd_result(str(contract_id), True, "modules_updated")
+                        else:
+                            mqtt_bridge.publish_response(cmd_type, "applied", {"toggles": toggles}, req_id)
 
                     elif cmd_type == "get_context":
                         ctx_snapshot = short_term_memory.get_llm_context()
@@ -710,22 +734,35 @@ def run_pipeline(
                         }
                         mqtt_bridge.publish_response(cmd_type, "ok", status_data, req_id)
 
-                    elif cmd_type in ("delete_person", "forget_person"):
-                        del_name = str(cmd.get("name", "")).strip()
+                    elif cmd_type in ("forget", "delete_person", "forget_person"):
+                        del_name = str(args_dict.get("name", cmd.get("name", ""))).strip()
                         if not del_name:
-                            mqtt_bridge.publish_response(cmd_type, "error", {"error": "Missing person name"}, req_id)
+                            if contract_id:
+                                mqtt_bridge.publish_cmd_result(str(contract_id), False, "Missing person name")
+                            else:
+                                mqtt_bridge.publish_response(
+                                    cmd_type, "error", {"error": "Missing person name"}, req_id
+                                )
                         else:
                             ok = face_worker.identifier.delete_identity(del_name)
                             if ok:
                                 events_log.append(f"Deleted identity: {del_name}")
-                                mqtt_bridge.publish_response(cmd_type, "success", {"name": del_name}, req_id)
+                                if contract_id:
+                                    mqtt_bridge.publish_cmd_result(str(contract_id), True, f"Deleted {del_name}")
+                                else:
+                                    mqtt_bridge.publish_response(cmd_type, "success", {"name": del_name}, req_id)
                             else:
-                                mqtt_bridge.publish_response(
-                                    cmd_type,
-                                    "not_found",
-                                    {"name": del_name, "error": f"Person '{del_name}' not found"},
-                                    req_id,
-                                )
+                                if contract_id:
+                                    mqtt_bridge.publish_cmd_result(
+                                        str(contract_id), False, f"Person '{del_name}' not found"
+                                    )
+                                else:
+                                    mqtt_bridge.publish_response(
+                                        cmd_type,
+                                        "not_found",
+                                        {"name": del_name, "error": f"Person '{del_name}' not found"},
+                                        req_id,
+                                    )
 
                     elif cmd_type == "rename_person":
                         old_name = str(cmd.get("old_name", "")).strip()
@@ -931,7 +968,13 @@ def run_pipeline(
                     events_log.append(msg)
                     event_detector._emit("person_enrolled", {"name": auto_enroll_session.name})
                     if mqtt_bridge:
-                        mqtt_bridge.publish_response("enroll_person", "completed", {"name": auto_enroll_session.name})
+                        if auto_enroll_req_id:
+                            mqtt_bridge.publish_cmd_result(auto_enroll_req_id, True, msg)
+                        else:
+                            mqtt_bridge.publish_response(
+                                "enroll_person", "completed", {"name": auto_enroll_session.name}
+                            )
+                    auto_enroll_req_id = None
                     face_worker.set_enroll_session(None)
                     auto_enroll_session = None
                 elif auto_enroll_session.failed:
@@ -940,24 +983,31 @@ def run_pipeline(
                         msg = f"Auto-enroll aborted: Already registered as '{reg_as}'"
                         events_log.append(msg)
                         if mqtt_bridge:
-                            mqtt_bridge.publish_response(
-                                "enroll_person",
-                                "already_registered",
-                                {
-                                    "name": auto_enroll_session.name,
-                                    "registered_as": reg_as,
-                                    "error": auto_enroll_session.error_msg,
-                                },
-                            )
+                            if auto_enroll_req_id:
+                                mqtt_bridge.publish_cmd_result(auto_enroll_req_id, False, msg)
+                            else:
+                                mqtt_bridge.publish_response(
+                                    "enroll_person",
+                                    "already_registered",
+                                    {
+                                        "name": auto_enroll_session.name,
+                                        "registered_as": reg_as,
+                                        "error": auto_enroll_session.error_msg,
+                                    },
+                                )
                     else:
                         msg = f"Auto-enroll failed: {auto_enroll_session.error_msg}"
                         events_log.append(msg)
                         if mqtt_bridge:
-                            mqtt_bridge.publish_response(
-                                "enroll_person",
-                                "failed",
-                                {"error": auto_enroll_session.error_msg},
-                            )
+                            if auto_enroll_req_id:
+                                mqtt_bridge.publish_cmd_result(auto_enroll_req_id, False, msg)
+                            else:
+                                mqtt_bridge.publish_response(
+                                    "enroll_person",
+                                    "failed",
+                                    {"error": auto_enroll_session.error_msg},
+                                )
+                    auto_enroll_req_id = None
                     face_worker.set_enroll_session(None)
                     auto_enroll_session = None
 

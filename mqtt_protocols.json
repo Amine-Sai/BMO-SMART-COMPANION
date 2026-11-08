@@ -29,7 +29,7 @@
       },
       "BMO_MQTT_TOPIC_CMD": {
         "description": "MQTT topic for incoming commands to BMO vision",
-        "default": "bmo/vision/command"
+        "default": "bmo/vision/cmd"
       },
       "BMO_MQTT_TOPIC_EVENT": {
         "description": "MQTT topic for outgoing real-time vision events",
@@ -41,12 +41,12 @@
       },
       "BMO_MQTT_TOPIC_RESP": {
         "description": "MQTT topic for command responses and status acknowledgments",
-        "default": "bmo/vision/response"
+        "default": "bmo/vision/cmd_result"
       }
     }
   },
   "topics": {
-    "bmo/vision/command": {
+    "bmo/vision/cmd": {
       "direction": "incoming",
       "description": "Asynchronous command queue for controlling vision modes, face/object enrollment, and memory queries.",
       "qos": 0
@@ -61,7 +61,7 @@
       "description": "Short-term scene memory and natural language scene summaries published periodically (every 5s) and on demand.",
       "qos": 0
     },
-    "bmo/vision/response": {
+    "bmo/vision/cmd_result": {
       "direction": "outgoing",
       "description": "Command acknowledgments, progress updates, success payloads, and error reports.",
       "qos": 0
@@ -71,7 +71,7 @@
     "enroll_person": {
       "aliases": ["save_person", "remember_person"],
       "description": "Initiate hands-free multi-shot face enrollment for a person with viewpoint diversity checks.",
-      "topic": "bmo/vision/command",
+      "topic": "bmo/vision/cmd",
       "request_schema": {
         "type": "object",
         "properties": {
@@ -110,7 +110,7 @@
     "delete_person": {
       "aliases": ["forget_person"],
       "description": "Permanently remove a person from the biometric identity registry and delete visual embeddings.",
-      "topic": "bmo/vision/command",
+      "topic": "bmo/vision/cmd",
       "request_schema": {
         "type": "object",
         "properties": {
@@ -132,7 +132,7 @@
     },
     "rename_person": {
       "description": "Rename a registered person and update gallery metadata without losing visual embeddings.",
-      "topic": "bmo/vision/command",
+      "topic": "bmo/vision/cmd",
       "request_schema": {
         "type": "object",
         "properties": {
@@ -157,7 +157,7 @@
     "list_persons": {
       "aliases": ["list_identities", "get_roster"],
       "description": "List all registered identities in the biometric gallery with encounter counts and timestamps.",
-      "topic": "bmo/vision/command",
+      "topic": "bmo/vision/cmd",
       "request_schema": {
         "type": "object",
         "properties": {
@@ -191,7 +191,7 @@
     "recheck_face": {
       "aliases": ["reverify_face"],
       "description": "Wake the facial recognition worker in lazy mode to reverify a specific track ID or all visible persons.",
-      "topic": "bmo/vision/command",
+      "topic": "bmo/vision/cmd",
       "request_schema": {
         "type": "object",
         "properties": {
@@ -213,7 +213,7 @@
     "register_object": {
       "aliases": ["enroll_object", "save_object"],
       "description": "Learn a new object. If shots > 0, collects multi-angle visual crops and stores a 512-D exemplar. If shots = 0, instantly updates YOLO-World zero-shot text vocabulary.",
-      "topic": "bmo/vision/command",
+      "topic": "bmo/vision/cmd",
       "request_schema": {
         "type": "object",
         "properties": {
@@ -242,7 +242,7 @@
     "delete_object": {
       "aliases": ["forget_object"],
       "description": "Delete a registered object from the gallery and reload active detector classes.",
-      "topic": "bmo/vision/command",
+      "topic": "bmo/vision/cmd",
       "request_schema": {
         "type": "object",
         "properties": {
@@ -264,7 +264,7 @@
     },
     "rename_object": {
       "description": "Rename a registered object and update associated exemplar vectors and vocabulary.",
-      "topic": "bmo/vision/command",
+      "topic": "bmo/vision/cmd",
       "request_schema": {
         "type": "object",
         "properties": {
@@ -289,7 +289,7 @@
     "list_objects": {
       "aliases": ["get_objects"],
       "description": "Return all registered custom objects and visual exemplar metadata.",
-      "topic": "bmo/vision/command",
+      "topic": "bmo/vision/cmd",
       "request_schema": {
         "type": "object",
         "properties": {
@@ -322,7 +322,7 @@
     },
     "set_object_classes": {
       "description": "Hot-reload the active YOLO-World detection vocabulary with a custom list of class names.",
-      "topic": "bmo/vision/command",
+      "topic": "bmo/vision/cmd",
       "request_schema": {
         "type": "object",
         "properties": {
@@ -344,7 +344,7 @@
     },
     "get_context": {
       "description": "Fetch immediate short-term visual memory context and natural language summary for LLM prompt generation.",
-      "topic": "bmo/vision/command",
+      "topic": "bmo/vision/cmd",
       "request_schema": {
         "type": "object",
         "properties": {
@@ -393,7 +393,7 @@
     },
     "set_mode": {
       "description": "Switch pipeline execution state between lazy, active (all models awake), or idle (face/sign sleep).",
-      "topic": "bmo/vision/command",
+      "topic": "bmo/vision/cmd",
       "request_schema": {
         "type": "object",
         "properties": {
@@ -414,7 +414,7 @@
     },
     "status": {
       "description": "Retrieve pipeline operational health, current frame rate, lazy mode state, and toggle statuses.",
-      "topic": "bmo/vision/command",
+      "topic": "bmo/vision/cmd",
       "request_schema": {
         "type": "object",
         "properties": {

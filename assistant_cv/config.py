@@ -6,10 +6,10 @@ import pathlib
 import torch
 
 from bmo_contracts.topics import (
-    VISION_CMD_LEGACY,
+    VISION_CMD,
+    VISION_CMD_RESULT,
     VISION_CONTEXT,
     VISION_EVENTS,
-    VISION_RESP_LEGACY,
 )
 
 BASE_DIR = pathlib.Path(__file__).resolve().parent
@@ -72,10 +72,10 @@ AUTO_ENROLL_SHOTS = int(os.environ.get("BMO_ENROLL_SHOTS", "8"))
 # MQTT broker settings
 MQTT_HOST = os.environ.get("BMO_MQTT_HOST", "localhost")
 MQTT_PORT = int(os.environ.get("BMO_MQTT_PORT", "1883"))
-MQTT_TOPIC_CMD = os.environ.get("BMO_MQTT_TOPIC_CMD", VISION_CMD_LEGACY)
+MQTT_TOPIC_CMD = os.environ.get("BMO_MQTT_TOPIC_CMD", VISION_CMD)
 MQTT_TOPIC_EVENT = os.environ.get("BMO_MQTT_TOPIC_EVENT", VISION_EVENTS)
 MQTT_TOPIC_CTX = os.environ.get("BMO_MQTT_TOPIC_CTX", VISION_CONTEXT)
-MQTT_TOPIC_RESP = os.environ.get("BMO_MQTT_TOPIC_RESP", VISION_RESP_LEGACY)
+MQTT_TOPIC_RESP = os.environ.get("BMO_MQTT_TOPIC_RESP", VISION_CMD_RESULT)
 
 PALM_MODEL_URL = (
     "https://huggingface.co/opencv/palm_detection_mediapipe/resolve/main/palm_detection_mediapipe_2023feb.onnx"

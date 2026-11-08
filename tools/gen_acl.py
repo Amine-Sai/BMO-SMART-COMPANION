@@ -7,8 +7,6 @@ from pathlib import Path
 
 from bmo_contracts.topics import (
     TOPICS,
-    VISION_CMD_LEGACY,
-    VISION_RESP_LEGACY,
     Role,
 )
 
@@ -27,13 +25,6 @@ def generate_acl_text() -> str:
                 write_topics.add(topic_name)
             if role in spec.sub_roles:
                 read_topics.add(topic_name)
-
-        if role == "cv":
-            read_topics.add(VISION_CMD_LEGACY)
-            write_topics.add(VISION_RESP_LEGACY)
-        elif role == "brain":
-            write_topics.add(VISION_CMD_LEGACY)
-            read_topics.add(VISION_RESP_LEGACY)
 
         role_lines = [f"user {role}"]
         for topic in sorted(write_topics):

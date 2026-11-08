@@ -40,10 +40,10 @@ import time
 from typing import Any, Dict, Optional
 
 from bmo_contracts.topics import (
-    VISION_CMD_LEGACY,
+    VISION_CMD,
+    VISION_CMD_RESULT,
     VISION_CONTEXT,
     VISION_EVENTS,
-    VISION_RESP_LEGACY,
     VISION_WILDCARD,
 )
 
@@ -115,8 +115,8 @@ class BMOMQTTTester:
             data = {"raw": payload_raw}
 
         # Check for command response correlation (only from response topic)
-        req_id = data.get("request_id")
-        if topic == VISION_RESP_LEGACY and req_id and req_id in self.response_queues:
+        req_id = data.get("request_id") or data.get("id")
+        if topic == VISION_CMD_RESULT and req_id and req_id in self.response_queues:
             self.response_queues[req_id].put(data)
         self.all_responses.put(data)
 
@@ -133,7 +133,7 @@ class BMOMQTTTester:
                 f"{C_GRAY}[{now_str}]{C_RESET} {C_CYAN}{C_BOLD}[EVENT]{C_RESET} {C_BOLD}{ev_type.upper()}{C_RESET}: {json.dumps(ev_data)}"
             )
 
-        elif topic == VISION_RESP_LEGACY:
+        elif topic == VISION_CMD_RESULT:
             cmd = data.get("command", "")
             status = data.get("status", "")
             req_id = data.get("request_id", "")
@@ -155,7 +155,7 @@ class BMOMQTTTester:
             tag = f" {C_GRAY}(req: {req_id}){C_RESET}" if req_id else ""
             print(f"{C_GRAY}[{now_str}]{C_RESET} {C_YELLOW}{C_BOLD}[CONTEXT]{C_RESET}{tag} {summary}")
 
-        elif topic == VISION_CMD_LEGACY:
+        elif topic == VISION_CMD:
             cmd = data.get("command", "")
             print(
                 f"{C_GRAY}[{now_str}]{C_RESET} {C_BLUE}{C_BOLD}[COMMAND SENT]{C_RESET} {cmd} {C_GRAY}{json.dumps(data)}{C_RESET}"
@@ -208,7 +208,7 @@ class BMOMQTTTester:
         resp_q: queue.Queue[Dict[str, Any]] = queue.Queue()
         self.response_queues[req_id] = resp_q
 
-        topic_cmd = os.environ.get("BMO_MQTT_TOPIC_CMD", VISION_CMD_LEGACY)
+        topic_cmd = os.environ.get("BMO_MQTT_TOPIC_CMD", VISION_CMD)
         t0 = time.perf_counter()
         self.client.publish(topic_cmd, json.dumps(payload), qos=0)
 

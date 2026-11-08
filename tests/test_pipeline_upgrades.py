@@ -14,7 +14,7 @@ if str(BASE_DIR) not in sys.path:
 from assistant_cv.enroll import AutoEnrollSession
 from assistant_cv.memory import PersonFaceSynchronizer, ShortTermMemory, get_screen_position
 from assistant_cv.mqtt_bridge import MQTTBridge, _dumps, _loads
-from bmo_contracts.topics import VISION_CMD_LEGACY
+from bmo_contracts.topics import VISION_CMD
 
 
 class DummyFace:
@@ -152,7 +152,7 @@ class TestMQTTBridgeSerialization(unittest.TestCase):
         # Mock incoming message
         class MockMsg:
             payload = b'{"cmd": "get_context", "request_id": "99"}'
-            topic = VISION_CMD_LEGACY
+            topic = VISION_CMD
 
         bridge._on_message(None, None, MockMsg())
         cmds = bridge.poll_commands()

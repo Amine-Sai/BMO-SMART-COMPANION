@@ -33,7 +33,7 @@ except ImportError:
     mqtt = None
     CallbackAPIVersion = None
 
-from bmo_contracts.models import EVENT_ADAPTER, Scene, VisionStatus
+from bmo_contracts.models import EVENT_ADAPTER, Scene, VisionCmdResult, VisionStatus
 from bmo_contracts.topics import (
     VISION_CMD,
     VISION_CMD_RESULT,
@@ -295,6 +295,16 @@ class MQTTBridge:
             "data": data,
         }
         self.publish_json(self.event_topic, payload, qos=0)
+
+    def publish_cmd_result(self, cmd_id: str, ok: bool, detail: str) -> None:
+        """Publish contract-validated VisionCmdResult on VISION_CMD_RESULT."""
+        if self.client is None or not self.connected:
+            return
+        try:
+            res = VisionCmdResult(id=str(cmd_id), ok=bool(ok), detail=str(detail))
+            self.client.publish(self.cmd_result_topic, _dumps(res.model_dump()), qos=1)
+        except Exception as exc:
+            print(f"[MQTTBridge] Cmd result publish error: {exc}", file=sys.stderr, flush=True)
 
     def publish_response(
         self,

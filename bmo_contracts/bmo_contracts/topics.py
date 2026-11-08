@@ -41,9 +41,7 @@ HW_CMD = "bmo/hw/cmd"
 HW_STATUS = "bmo/hw/status"
 HW_EVENT = "bmo/hw/event"
 
-# Legacy compatibility constants (to be removed in T2.3)
-VISION_CMD_LEGACY = "bmo/vision/command"
-VISION_RESP_LEGACY = "bmo/vision/response"
+# Wildcard topic for monitoring tools
 VISION_WILDCARD = "bmo/vision/#"
 
 TOPICS: dict[str, TopicSpec] = {
