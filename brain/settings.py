@@ -45,19 +45,34 @@ class AudioSettings(BaseModel):
     tts_voice: str = "en_US-lessac-medium"
 
 
+class PolicySettings(BaseModel):
+    """Configuration for proactive event policy."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    face_min_conf: float
+    greeting_cooldown_s: float
+    global_cooldown_s: float
+    walk_by_window_s: float
+    sign_min_conf: float
+    sign_debounce_s: float
+    idle_unload_s: float
+
+
 class Settings(BaseModel):
     """Root configuration holding all subsystem settings."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     llm: LLMSettings = Field(default_factory=LLMSettings)
-    scene: SceneSettings = Field(default_factory=SceneSettings)
+    scene: SceneSettings | None = None
     audio: AudioSettings | None = None
+    policy: PolicySettings | None = None
 
 
-def load_settings(config_dir: str | Path = "config/settings.d") -> Settings:
-    """Load and merge configuration files from config_dir or settings.d."""
-    path = Path(config_dir)
+def load_settings(settings_dir: str | Path = "config/settings.d") -> Settings:
+    """Load and merge configuration files from settings_dir or settings.d."""
+    path = Path(settings_dir)
     if not path.exists():
         raise FileNotFoundError(f"Configuration path does not exist: {path}")
 
