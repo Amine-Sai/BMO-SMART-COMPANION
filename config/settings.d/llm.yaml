@@ -1,0 +1,7 @@
+llm:
+  model: "qwen2.5:3b"
+  host: "http://127.0.0.1:11434"
+  num_ctx: 4096
+  keep_alive: "5m"
+  timeout_s: 10.0
+  temperature: 0.2
