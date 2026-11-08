@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
-from pydantic import BaseModel, ConfigDict
 import yaml
+from pydantic import BaseModel, ConfigDict
 
 
 class LLMSettings(BaseModel):
@@ -17,11 +17,17 @@ class LLMSettings(BaseModel):
     temperature: float
 
 
+class SceneSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    max_age_s: float
+
+
 class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     llm: LLMSettings
-    scene: Any | None = None
+    scene: SceneSettings | None = None
     audio: Any | None = None
     policy: Any | None = None
 
