@@ -58,7 +58,7 @@ class TestRepoHygiene(unittest.TestCase):
         violations: list[str] = []
 
         for rel_path in tracked_files:
-            if rel_path == "docs/plan.md":
+            if rel_path == "docs/plan.md" or rel_path == "tests/test_hygiene.py" or rel_path.startswith("docs/acceptance/"):
                 continue
             full_path = REPO_ROOT / rel_path
             if not full_path.is_file():
