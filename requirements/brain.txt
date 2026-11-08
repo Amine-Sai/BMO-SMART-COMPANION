@@ -1,0 +1,12 @@
+faster-whisper
+openwakeword>=0.6.0
+silero-vad
+piper-tts
+sounddevice
+ollama
+httpx
+paho-mqtt
+orjson
+pydantic
+pyyaml
+pytest
