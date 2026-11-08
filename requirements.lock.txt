@@ -2,6 +2,7 @@ absl-py==2.5.1
 annotated-types==0.8.0
 anyio==4.16.0
 av==19.0.2
+-e file:///home/judas/bmo-assistant/bmo_contracts
 certifi==2026.10.23
 cffi==2.1.1
 charset-normalizer==3.5.2

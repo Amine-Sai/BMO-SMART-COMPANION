@@ -37,7 +37,15 @@ import os
 import queue
 import sys
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
+
+from bmo_contracts.topics import (
+    VISION_CMD_LEGACY,
+    VISION_CONTEXT,
+    VISION_EVENTS,
+    VISION_RESP_LEGACY,
+    VISION_WILDCARD,
+)
 
 try:
     import paho.mqtt.client as mqtt
@@ -82,16 +90,20 @@ class BMOMQTTTester:
         rc_val = getattr(rc, "value", rc)
         if rc_val == 0:
             self.connected = True
-            client.subscribe("bmo/vision/#", qos=0)
+            client.subscribe(VISION_WILDCARD, qos=0)
             if not self.monitor_mode:
                 # Silent connect unless in monitor mode
                 pass
             else:
-                print(f"{C_GREEN}[CONNECTED]{C_RESET} Connected to broker {self.host}:{self.port}, listening on 'bmo/vision/#'\n")
+                print(
+                    f"{C_GREEN}[CONNECTED]{C_RESET} Connected to broker {self.host}:{self.port}, listening on '{VISION_WILDCARD}'\n"
+                )
         else:
             print(f"{C_RED}[ERROR]{C_RESET} Failed to connect to broker (rc: {rc_val})", file=sys.stderr)
 
-    def _on_disconnect(self, client: Any, userdata: Any, flags_or_rc: Any, rc: Any = None, properties: Any = None) -> None:
+    def _on_disconnect(
+        self, client: Any, userdata: Any, flags_or_rc: Any, rc: Any = None, properties: Any = None
+    ) -> None:
         self.connected = False
 
     def _on_message(self, client: Any, userdata: Any, msg: Any) -> None:
@@ -102,9 +114,9 @@ class BMOMQTTTester:
         except Exception:
             data = {"raw": payload_raw}
 
-        # Check for command response correlation (only from bmo/vision/response)
+        # Check for command response correlation (only from response topic)
         req_id = data.get("request_id")
-        if topic == "bmo/vision/response" and req_id and req_id in self.response_queues:
+        if topic == VISION_RESP_LEGACY and req_id and req_id in self.response_queues:
             self.response_queues[req_id].put(data)
         self.all_responses.put(data)
 
@@ -114,30 +126,40 @@ class BMOMQTTTester:
     def _print_monitor_message(self, topic: str, data: Dict[str, Any]) -> None:
         now_str = time.strftime("%H:%M:%S")
 
-        if topic == "bmo/vision/events":
+        if topic == VISION_EVENTS:
             ev_type = data.get("event", "unknown")
             ev_data = data.get("data", {})
-            print(f"{C_GRAY}[{now_str}]{C_RESET} {C_CYAN}{C_BOLD}[EVENT]{C_RESET} {C_BOLD}{ev_type.upper()}{C_RESET}: {json.dumps(ev_data)}")
+            print(
+                f"{C_GRAY}[{now_str}]{C_RESET} {C_CYAN}{C_BOLD}[EVENT]{C_RESET} {C_BOLD}{ev_type.upper()}{C_RESET}: {json.dumps(ev_data)}"
+            )
 
-        elif topic == "bmo/vision/response":
+        elif topic == VISION_RESP_LEGACY:
             cmd = data.get("command", "")
             status = data.get("status", "")
             req_id = data.get("request_id", "")
-            status_color = C_GREEN if status in ("ok", "success", "completed", "applied") else (C_YELLOW if status == "started" else C_RED)
-            print(f"{C_GRAY}[{now_str}]{C_RESET} {C_MAGENTA}{C_BOLD}[RESPONSE]{C_RESET} {cmd} -> {status_color}{status.upper()}{C_RESET} {C_GRAY}(req: {req_id}){C_RESET}")
+            status_color = (
+                C_GREEN
+                if status in ("ok", "success", "completed", "applied")
+                else (C_YELLOW if status == "started" else C_RED)
+            )
+            print(
+                f"{C_GRAY}[{now_str}]{C_RESET} {C_MAGENTA}{C_BOLD}[RESPONSE]{C_RESET} {cmd} -> {status_color}{status.upper()}{C_RESET} {C_GRAY}(req: {req_id}){C_RESET}"
+            )
             if "data" in data and data["data"]:
                 print(f"         {C_GRAY}{json.dumps(data['data'])}{C_RESET}")
 
-        elif topic == "bmo/vision/context":
+        elif topic == VISION_CONTEXT:
             ctx = data.get("context", {})
             summary = ctx.get("summary", "")
             req_id = data.get("request_id")
             tag = f" {C_GRAY}(req: {req_id}){C_RESET}" if req_id else ""
             print(f"{C_GRAY}[{now_str}]{C_RESET} {C_YELLOW}{C_BOLD}[CONTEXT]{C_RESET}{tag} {summary}")
 
-        elif topic == "bmo/vision/command":
+        elif topic == VISION_CMD_LEGACY:
             cmd = data.get("command", "")
-            print(f"{C_GRAY}[{now_str}]{C_RESET} {C_BLUE}{C_BOLD}[COMMAND SENT]{C_RESET} {cmd} {C_GRAY}{json.dumps(data)}{C_RESET}")
+            print(
+                f"{C_GRAY}[{now_str}]{C_RESET} {C_BLUE}{C_BOLD}[COMMAND SENT]{C_RESET} {cmd} {C_GRAY}{json.dumps(data)}{C_RESET}"
+            )
 
         else:
             print(f"{C_GRAY}[{now_str}]{C_RESET} [{topic}] {json.dumps(data)}")
@@ -151,13 +173,16 @@ class BMOMQTTTester:
             while not self.connected and (time.time() - t0) < 2.5:
                 time.sleep(0.05)
             if not self.connected:
-                print(f"{C_RED}[ERROR]{C_RESET} Could not connect to MQTT broker at {self.host}:{self.port}.", file=sys.stderr)
-                print(f"       Make sure a broker is running, e.g.: python tools/simple_broker.py", file=sys.stderr)
+                print(
+                    f"{C_RED}[ERROR]{C_RESET} Could not connect to MQTT broker at {self.host}:{self.port}.",
+                    file=sys.stderr,
+                )
+                print("       Make sure a broker is running, e.g.: python tools/simple_broker.py", file=sys.stderr)
                 return False
             return True
         except Exception as exc:
             print(f"{C_RED}[ERROR]{C_RESET} Connection failed: {exc}", file=sys.stderr)
-            print(f"       Start broker first: python tools/simple_broker.py", file=sys.stderr)
+            print("       Start broker first: python tools/simple_broker.py", file=sys.stderr)
             return False
 
     def stop(self) -> None:
@@ -174,7 +199,7 @@ class BMOMQTTTester:
         timeout: float = 6.0,
         wait_for_response: bool = True,
     ) -> Optional[Dict[str, Any]]:
-        """Publish a command to bmo/vision/command and wait for correlated response."""
+        """Publish a command and wait for correlated response."""
         req_id = f"req-{command}-{int(time.time() * 1000) % 10000}"
         payload: Dict[str, Any] = {"command": command, "request_id": req_id}
         if params:
@@ -183,7 +208,7 @@ class BMOMQTTTester:
         resp_q: queue.Queue[Dict[str, Any]] = queue.Queue()
         self.response_queues[req_id] = resp_q
 
-        topic_cmd = os.environ.get("BMO_MQTT_TOPIC_CMD", "bmo/vision/command")
+        topic_cmd = os.environ.get("BMO_MQTT_TOPIC_CMD", VISION_CMD_LEGACY)
         t0 = time.perf_counter()
         self.client.publish(topic_cmd, json.dumps(payload), qos=0)
 
@@ -206,13 +231,14 @@ class BMOMQTTTester:
 # CLI Modes
 # ---------------------------------------------------------------------------
 
+
 def run_monitor(tester: BMOMQTTTester) -> None:
     tester.monitor_mode = True
-    print(f"\n====================================================================")
-    print(f"  BMO Vision Real-Time MQTT Monitor")
-    print(f"  Listening on: {tester.host}:{tester.port} ('bmo/vision/#')")
-    print(f"  Press Ctrl+C to exit")
-    print(f"====================================================================\n")
+    print("\n====================================================================")
+    print("  BMO Vision Real-Time MQTT Monitor")
+    print(f"  Listening on: {tester.host}:{tester.port} ('{VISION_WILDCARD}')")
+    print("  Press Ctrl+C to exit")
+    print("====================================================================\n")
     try:
         while True:
             time.sleep(1.0)
@@ -258,20 +284,24 @@ def run_single_command(tester: BMOMQTTTester, cmd: str, args: argparse.Namespace
 
     if resp is None:
         print(f"{C_RED}[TIMEOUT]{C_RESET} No response received within {timeout}s.")
-        print(f"          Verify assistant_cv/main.py is running with MQTT enabled.")
+        print("          Verify assistant_cv/main.py is running with MQTT enabled.")
     else:
         status = resp.get("status", "unknown")
-        color = C_GREEN if status in ("ok", "success", "completed", "applied") else (C_YELLOW if status == "started" else C_RED)
+        color = (
+            C_GREEN
+            if status in ("ok", "success", "completed", "applied")
+            else (C_YELLOW if status == "started" else C_RED)
+        )
         lat = resp.get("_latency_ms", 0.0)
         print(f"{color}{C_BOLD}[STATUS: {status.upper()}]{C_RESET} in {lat} ms")
         print(json.dumps(resp, indent=2))
 
 
 def run_test_suite(tester: BMOMQTTTester) -> None:
-    print(f"\n====================================================================")
-    print(f"  BMO Vision Pipeline MQTT Automated Command Sweep")
+    print("\n====================================================================")
+    print("  BMO Vision Pipeline MQTT Automated Command Sweep")
     print(f"  Target Broker: {tester.host}:{tester.port}")
-    print(f"====================================================================\n")
+    print("====================================================================\n")
 
     tests = [
         ("Pipeline Status", "status", {}),
@@ -299,9 +329,9 @@ def run_test_suite(tester: BMOMQTTTester) -> None:
 
 
 def run_interactive(tester: BMOMQTTTester) -> None:
-    print(f"\n====================================================================")
-    print(f"  BMO Vision Interactive MQTT Console")
-    print(f"====================================================================")
+    print("\n====================================================================")
+    print("  BMO Vision Interactive MQTT Console")
+    print("====================================================================")
     while True:
         print("\nChoose an action:")
         print("  1. Query Status")
@@ -323,7 +353,7 @@ def run_interactive(tester: BMOMQTTTester) -> None:
             resp = tester.send_command("get_context")
             if resp and "data" in resp:
                 print(f"\n{C_YELLOW}Scene Summary:{C_RESET} {resp['data'].get('context', {}).get('summary')}")
-                print(json.dumps(resp['data'], indent=2))
+                print(json.dumps(resp["data"], indent=2))
         elif choice == "3":
             resp = tester.send_command("list_persons")
             print(json.dumps(resp, indent=2))
@@ -340,10 +370,14 @@ def run_interactive(tester: BMOMQTTTester) -> None:
             name = input("Enter object name (e.g. lighter): ").strip()
             if not name:
                 continue
-            shots = int(input("Enter shots (0 for instant zero-shot text, >0 for visual exemplar) [6]: ").strip() or "6")
+            shots = int(
+                input("Enter shots (0 for instant zero-shot text, >0 for visual exemplar) [6]: ").strip() or "6"
+            )
             syns = input("Enter comma-separated synonyms (optional): ").strip()
             syn_list = [s.strip() for s in syns.split(",") if s.strip()]
-            resp = tester.send_command("register_object", {"name": name, "shots": shots, "synonyms": syn_list}, timeout=25.0)
+            resp = tester.send_command(
+                "register_object", {"name": name, "shots": shots, "synonyms": syn_list}, timeout=25.0
+            )
             print(json.dumps(resp, indent=2))
         elif choice == "7":
             name = input("Enter person name to delete: ").strip()
@@ -366,8 +400,10 @@ def run_interactive(tester: BMOMQTTTester) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="BMO Assistant MQTT Inspection & Command Tool")
     parser.add_argument("-H", "--host", default=os.environ.get("BMO_MQTT_HOST", "localhost"), help="MQTT broker host")
-    parser.add_argument("-p", "--port", type=int, default=int(os.environ.get("BMO_MQTT_PORT", 1883)), help="MQTT broker port")
-    parser.add_argument("-m", "--monitor", action="store_true", help="Live stream and monitor bmo/vision/#")
+    parser.add_argument(
+        "-p", "--port", type=int, default=int(os.environ.get("BMO_MQTT_PORT", 1883)), help="MQTT broker port"
+    )
+    parser.add_argument("-m", "--monitor", action="store_true", help="Live stream and monitor vision topics")
     parser.add_argument("-c", "--cmd", help="Command name to execute")
     parser.add_argument("-n", "--name", help="Target person or object name")
     parser.add_argument("-s", "--shots", type=int, help="Target shots for enrollment")

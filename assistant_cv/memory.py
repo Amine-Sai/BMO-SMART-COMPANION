@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 import time
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 
 def _get_box_center(bbox: Sequence[int | float]) -> tuple[float, float]:
@@ -156,6 +156,7 @@ class PersonFaceSynchronizer:
         Known/registered persons on active tracks are remembered and will NOT trigger
         redundant face re-checks unless explicitly forced via flag_for_recheck().
         """
+        _ = now
         if not person_detections:
             return False
 
@@ -180,26 +181,28 @@ class PersonFaceSynchronizer:
 class ShortTermMemory:
     """Maintains a rolling temporal memory of scene entities, actions, and events for LLM queries."""
 
-    def __init__(self, window_sec: float = 60.0, registry: Any = None) -> None:
+    def __init__(
+        self,
+        window_sec: float = 60.0,
+        registry: Any = None,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
         self.window_sec = float(window_sec)
         self.registry = registry
-        self.events: deque[dict[str, Any]] = deque(maxlen=30)
-        self.window_sec = float(window_sec)
+        self.clock = clock
         self.events: deque[dict[str, Any]] = deque(maxlen=30)
         self.recent_signs: deque[dict[str, Any]] = deque(maxlen=20)
-        # identity -> {"first_seen": float, "last_seen": float, "position": str, "proximity": str}
         self.persons_history: dict[str, dict[str, Any]] = {}
-        # label -> {"last_seen": float, "count": int, "positions": list[str]}
         self.objects_history: dict[str, dict[str, Any]] = {}
         self.current_persons: list[dict[str, Any]] = []
         self.current_objects: list[dict[str, Any]] = []
-        self.last_update_time = time.time()
+        self.last_update_time = self.clock()
 
     def record_event(self, event_type: str, data: dict[str, Any] | None = None) -> None:
         """Record a timestamped discrete transition event."""
         item = {
             "event": event_type,
-            "timestamp": time.time(),
+            "timestamp": self.clock(),
             "data": data or {},
         }
         self.events.append(item)
@@ -210,7 +213,7 @@ class ShortTermMemory:
             "sign": sign.upper(),
             "conf": round(float(conf), 2),
             "signer": signer,
-            "timestamp": time.time(),
+            "timestamp": self.clock(),
         }
         self.recent_signs.append(item)
         self.record_event("sign_recognized", item)
@@ -221,7 +224,7 @@ class ShortTermMemory:
         frame_shape: tuple[int, int] = (480, 640),
     ) -> None:
         """Update rolling visual memory with latest synced detections."""
-        now = time.time()
+        now = self.clock()
         self.last_update_time = now
         fh, fw = frame_shape[:2]
         frame_area = float(fh * fw)
@@ -290,7 +293,7 @@ class ShortTermMemory:
 
     def get_llm_context(self) -> dict[str, Any]:
         """Generate compact, structured JSON visual context designed for TTS/LLM system prompt injection."""
-        now = time.time()
+        now = self.clock()
 
         # 1. Active people
         active_p = []
@@ -313,7 +316,9 @@ class ShortTermMemory:
 
         # 2. Recently seen people who left
         recently_left = []
-        curr_keys = {p["identity"] if p["identity"] != "unknown" else f"person_{p['track_id']}" for p in self.current_persons}
+        curr_keys = {
+            p["identity"] if p["identity"] != "unknown" else f"person_{p['track_id']}" for p in self.current_persons
+        }
         for k, v in self.persons_history.items():
             if k not in curr_keys:
                 ago = round(now - v["last_seen"], 1)
@@ -349,7 +354,9 @@ class ShortTermMemory:
 
         if signs_summary:
             latest_s = signs_summary[0]
-            summary_parts.append(f"Recent sign: {latest_s['sign']} ({latest_s['conf']*100:.0f}%, {latest_s['ago_sec']}s ago).")
+            summary_parts.append(
+                f"Recent sign: {latest_s['sign']} ({latest_s['conf'] * 100:.0f}%, {latest_s['ago_sec']}s ago)."
+            )
 
         summary_text = " ".join(summary_parts)
 
@@ -369,10 +376,12 @@ class ShortTermMemory:
         else:
             try:
                 from .registry import get_identity_registry
+
                 known_persons_roster = get_identity_registry().get_known_names()
             except Exception:
                 try:
                     from assistant_cv.registry import get_identity_registry
+
                     known_persons_roster = get_identity_registry().get_known_names()
                 except Exception:
                     pass
@@ -381,10 +390,12 @@ class ShortTermMemory:
         known_objects_roster: list[str] = []
         try:
             from .registry import get_object_registry
+
             known_objects_roster = get_object_registry().get_known_names()
         except Exception:
             try:
                 from assistant_cv.registry import get_object_registry
+
                 known_objects_roster = get_object_registry().get_known_names()
             except Exception:
                 pass
@@ -399,4 +410,82 @@ class ShortTermMemory:
             "recent_events": events_list,
             "known_persons": known_persons_roster,
             "registered_objects": known_objects_roster,
+        }
+
+    def get_scene_contract(self) -> dict[str, Any]:
+        """Generate scene state matching the bmo_contracts.models.Scene schema."""
+        now = self.clock()
+
+        people: list[dict[str, Any]] = []
+        for p in self.current_persons:
+            ident = str(p.get("identity", "unknown"))
+            tid = p.get("track_id")
+            hist_key = ident if ident != "unknown" else f"person_{tid}"
+            hist = self.persons_history.get(hist_key)
+            first_seen = hist["first_seen"] if hist else now
+            since_s = round(max(0.0, now - first_seen), 1)
+
+            prox = p.get("proximity", "medium")
+            if prox == "close":
+                prox = "near"
+            elif prox not in ("near", "medium", "far"):
+                prox = "medium"
+
+            pos = p.get("position", "center")
+            if pos not in ("left", "center", "right"):
+                pos = "center"
+
+            people.append(
+                {
+                    "track_id": tid,
+                    "name": ident,
+                    "pos": pos,
+                    "proximity": prox,
+                    "since_s": since_s,
+                }
+            )
+
+        seen_labels: set[str] = set()
+        objects: list[str] = []
+        for o in self.current_objects:
+            lbl = str(o.get("label", ""))
+            if lbl and lbl not in seen_labels:
+                seen_labels.add(lbl)
+                objects.append(lbl)
+
+        last_sign: dict[str, Any] | None = None
+        if self.recent_signs:
+            latest = self.recent_signs[-1]
+            sign_ts = float(latest.get("timestamp", 0.0))
+            age = max(0.0, now - sign_ts)
+            if age <= self.window_sec:
+                last_sign = {
+                    "text": str(latest.get("sign", "")).lower(),
+                    "age_s": round(age, 1),
+                }
+
+        recent: list[str] = []
+        for ev in list(self.events)[-5:]:
+            ev_name = ev.get("event", "event")
+            data = ev.get("data", {})
+            if ev_name == "person_detected":
+                recent.append(f"person detected (track: {data.get('track_id', 'unknown')})")
+            elif ev_name == "person_left":
+                recent.append(f"person left (track: {data.get('track_id', 'unknown')})")
+            elif ev_name == "face_identified":
+                recent.append(f"face identified: {data.get('name', 'unknown')}")
+            elif ev_name == "sign_recognized":
+                sign_txt = data.get("text") or data.get("sign", "")
+                recent.append(f"sign: {sign_txt}")
+            elif ev_name in ("object_seen", "object_detected"):
+                recent.append(f"object seen: {data.get('label', 'unknown')}")
+            else:
+                recent.append(f"{ev_name}")
+
+        return {
+            "ts": round(now, 3),
+            "people": people,
+            "objects": objects,
+            "last_sign": last_sign,
+            "recent": recent,
         }

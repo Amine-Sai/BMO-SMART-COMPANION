@@ -1,6 +1,5 @@
 """Comprehensive unit and integration tests for BMO-CV upgrades."""
 
-import os
 import pathlib
 import sys
 import time
@@ -13,8 +12,9 @@ if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 from assistant_cv.enroll import AutoEnrollSession
-from assistant_cv.memory import PersonFaceSynchronizer, ShortTermMemory, get_proximity, get_screen_position
+from assistant_cv.memory import PersonFaceSynchronizer, ShortTermMemory, get_screen_position
 from assistant_cv.mqtt_bridge import MQTTBridge, _dumps, _loads
+from bmo_contracts.topics import VISION_CMD_LEGACY
 
 
 class DummyFace:
@@ -80,7 +80,14 @@ class TestShortTermMemory(unittest.TestCase):
     def test_memory_context_generation(self):
         mem = ShortTermMemory(window_sec=5.0)
         objects = [
-            {"label": "person", "conf": 0.92, "identity": "Alice", "face_conf": 0.85, "bbox": (250, 60, 390, 420), "id": 1},
+            {
+                "label": "person",
+                "conf": 0.92,
+                "identity": "Alice",
+                "face_conf": 0.85,
+                "bbox": (250, 60, 390, 420),
+                "id": 1,
+            },
             {"label": "cup", "conf": 0.80, "bbox": (100, 300, 150, 360), "id": None},
         ]
         mem.update(objects, frame_shape=(480, 640))
@@ -117,7 +124,7 @@ class TestAutoEnrollSession(unittest.TestCase):
             emb = np.zeros(512, dtype=np.float32)
             emb[i] = 1.0
             face = DummyFace(emb)
-            active = session.step([face])
+            session.step([face])
             time.sleep(0.015)
 
         self.assertTrue(session.completed)
@@ -141,10 +148,11 @@ class TestMQTTBridgeSerialization(unittest.TestCase):
 
     def test_command_queue(self):
         bridge = MQTTBridge()
+
         # Mock incoming message
         class MockMsg:
             payload = b'{"cmd": "get_context", "request_id": "99"}'
-            topic = "bmo/vision/command"
+            topic = VISION_CMD_LEGACY
 
         bridge._on_message(None, None, MockMsg())
         cmds = bridge.poll_commands()
@@ -203,10 +211,10 @@ class TestEventDetectorDebounce(unittest.TestCase):
         self.detector.update(objects=lighter_obj, faces=[], sign=None, sign_conf=0.0)
         self.assertEqual(len(self.emitted), 0)
 
-        # Frame 2: lighter still present -> confirmed (object_detected emitted)
+        # Frame 2: lighter still present -> confirmed (object_seen emitted)
         self.detector.update(objects=lighter_obj, faces=[], sign=None, sign_conf=0.0)
         self.assertEqual(len(self.emitted), 1)
-        self.assertEqual(self.emitted[0][0], "object_detected")
+        self.assertEqual(self.emitted[0][0], "object_seen")
         self.assertEqual(self.emitted[0][1]["label"], "lighter")
         self.assertEqual(self.emitted[0][1]["count"], 1)
 

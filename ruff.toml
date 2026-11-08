@@ -1,0 +1,5 @@
+line-length = 120
+
+[lint]
+select = ["F", "ARG", "ERA", "B"]
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?)|client|userdata|flags|flags_or_rc|rc|properties|args|kwargs)$"

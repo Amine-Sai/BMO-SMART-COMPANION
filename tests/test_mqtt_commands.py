@@ -2,14 +2,12 @@
 
 import asyncio
 import json
-import os
 import pathlib
-import queue
 import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import paho.mqtt.client as mqtt
 
@@ -17,6 +15,7 @@ from assistant_cv.mqtt_bridge import MQTTBridge
 from assistant_cv.memory import ShortTermMemory, PersonFaceSynchronizer
 from assistant_cv.registry import IdentityRegistry, ObjectRegistry
 from tools.simple_broker import SimpleMQTTBroker
+from bmo_contracts.topics import VISION_CMD_LEGACY, VISION_RESP_LEGACY
 
 
 class TestMQTTBridgeUnit(unittest.TestCase):
@@ -28,7 +27,7 @@ class TestMQTTBridgeUnit(unittest.TestCase):
     def test_command_normalization(self):
         """Verify command aliases 'cmd' and 'action' are normalized to 'command'."""
         mock_msg = MagicMock()
-        mock_msg.topic = "bmo/vision/command"
+        mock_msg.topic = VISION_CMD_LEGACY
         mock_msg.payload = b'{"cmd": "status", "request_id": "req-1"}'
         self.bridge._on_message(None, None, mock_msg)
 
@@ -48,7 +47,7 @@ class TestMQTTBridgeUnit(unittest.TestCase):
         published = []
         self.bridge.connected = True
         self.bridge.client = MagicMock()
-        self.bridge.client.publish = lambda topic, data, qos: published.append((topic, json.loads(data)))
+        self.bridge.client.publish = lambda topic, data, *args, **kwargs: published.append((topic, json.loads(data)))
 
         self.bridge.publish_response(
             command="list_persons",
@@ -68,6 +67,7 @@ class TestMQTTBridgeUnit(unittest.TestCase):
 
 
 import numpy as np
+
 
 class TestMQTTCommandDispatcher(unittest.TestCase):
     """Verify command handlers produce exact expected schemas and state transitions."""
@@ -205,14 +205,14 @@ class TestLiveMQTTRoundtrip(unittest.TestCase):
         client_connected = threading.Event()
         client_responses: list[dict] = []
 
-        def on_client_connect(c, u, flags, rc, props=None):
+        def on_client_connect(_c, _u, flags, rc, _props=None):
             client_connected.set()
 
         test_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="tester_agent")
         test_client.on_connect = on_client_connect
-        test_client.on_message = lambda c, u, msg: client_responses.append(json.loads(msg.payload))
+        test_client.on_message = lambda _c, _u, msg: client_responses.append(json.loads(msg.payload))
         test_client.connect("127.0.0.1", self.test_port)
-        test_client.subscribe("bmo/vision/response")
+        test_client.subscribe(VISION_RESP_LEGACY)
         test_client.loop_start()
 
         self.assertTrue(client_connected.wait(timeout=2.0))
@@ -220,7 +220,7 @@ class TestLiveMQTTRoundtrip(unittest.TestCase):
 
         # 3. Publish command from agent
         cmd_payload = {"command": "status", "request_id": "test-req-001"}
-        test_client.publish("bmo/vision/command", json.dumps(cmd_payload))
+        test_client.publish(VISION_CMD_LEGACY, json.dumps(cmd_payload))
 
         # Wait for command arrival
         for _ in range(30):

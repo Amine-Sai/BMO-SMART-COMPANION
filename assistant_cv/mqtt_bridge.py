@@ -25,12 +25,22 @@ except ImportError:
     def _loads(data: bytes | str) -> Any:
         return json.loads(data)
 
+
 try:
     import paho.mqtt.client as mqtt
     from paho.mqtt.enums import CallbackAPIVersion
 except ImportError:
     mqtt = None
     CallbackAPIVersion = None
+
+from bmo_contracts.models import EVENT_ADAPTER, Scene, VisionStatus
+from bmo_contracts.topics import (
+    VISION_CMD,
+    VISION_CMD_RESULT,
+    VISION_CONTEXT,
+    VISION_EVENTS,
+    VISION_STATUS,
+)
 
 try:
     from .config import (
@@ -64,18 +74,22 @@ class MQTTBridge:
         ctx_topic: str = MQTT_TOPIC_CTX,
         resp_topic: str = MQTT_TOPIC_RESP,
         on_command_callback: Callable[[dict[str, Any]], None] | None = None,
+        clock: Callable[[], float] = time.time,
     ) -> None:
         self.host = host
         self.port = int(port)
-        self.cmd_topic = cmd_topic
-        self.event_topic = event_topic
-        self.ctx_topic = ctx_topic
+        self.cmd_topic = cmd_topic or VISION_CMD
+        self.event_topic = event_topic or VISION_EVENTS
+        self.ctx_topic = ctx_topic or VISION_CONTEXT
         self.resp_topic = resp_topic
+        self.cmd_result_topic = VISION_CMD_RESULT
         self.on_command_callback = on_command_callback
+        self.clock = clock
 
         self.cmd_queue: queue.SimpleQueue[dict[str, Any]] = queue.SimpleQueue()
         self.connected: bool = False
         self.client: Any = None
+        self._event_counter: int = 0
 
         if mqtt is not None:
             if hasattr(CallbackAPIVersion, "VERSION2"):
@@ -88,31 +102,40 @@ class MQTTBridge:
             self.client.on_message = self._on_message
             self.client.on_socket_open = self._on_socket_open
 
-    def _on_socket_open(self, client: Any, userdata: Any, sock: socket.socket) -> None:
+    def _on_socket_open(self, _client: Any, _userdata: Any, sock: socket.socket) -> None:
         """Disable Nagle's algorithm for sub-millisecond local network packet delivery."""
         try:
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         except Exception:
             pass
 
-    def _on_connect(self, client: Any, userdata: Any, flags: Any, rc: Any, properties: Any = None) -> None:
+    def _on_connect(self, client: Any, _userdata: Any, _flags: Any, rc: Any, _properties: Any = None) -> None:
         rc_code = getattr(rc, "value", rc)
         if rc_code == 0:
             self.connected = True
-            client.subscribe(self.cmd_topic, qos=0)
+            try:
+                online_bytes = _dumps(VisionStatus(online=True).model_dump())
+                client.publish(VISION_STATUS, online_bytes, qos=1, retain=True)
+            except Exception:
+                pass
+
+            client.subscribe(self.cmd_topic, qos=1)
+            if self.cmd_topic != VISION_CMD:
+                client.subscribe(VISION_CMD, qos=1)
             print(f"[MQTTBridge] Connected to {self.host}:{self.port}, subscribed to '{self.cmd_topic}'", flush=True)
         else:
             print(f"[MQTTBridge] Connect failed with code {rc_code}", file=sys.stderr, flush=True)
 
-    def _on_disconnect(self, client: Any, userdata: Any, flags_or_rc: Any, rc: Any = None, properties: Any = None) -> None:
+    def _on_disconnect(
+        self, _client: Any, _userdata: Any, _flags_or_rc: Any, _rc: Any = None, _properties: Any = None
+    ) -> None:
         self.connected = False
 
-    def _on_message(self, client: Any, userdata: Any, msg: Any) -> None:
+    def _on_message(self, _client: Any, _userdata: Any, msg: Any) -> None:
         """Parse incoming JSON command and push to thread-safe queue."""
         try:
             payload = _loads(msg.payload)
             if isinstance(payload, dict):
-                # Standardize command field (allow aliases 'cmd' or 'action')
                 if "command" not in payload:
                     if "cmd" in payload:
                         payload["command"] = payload["cmd"]
@@ -132,6 +155,8 @@ class MQTTBridge:
             return False
 
         try:
+            lwt_payload = _dumps(VisionStatus(online=False).model_dump())
+            self.client.will_set(VISION_STATUS, lwt_payload, qos=1, retain=True)
             self.client.connect_async(self.host, self.port, keepalive=30)
             self.client.loop_start()
             return True
@@ -142,6 +167,12 @@ class MQTTBridge:
     def stop(self) -> None:
         """Disconnect and cleanly stop network loop thread."""
         if self.client is not None:
+            if self.connected:
+                try:
+                    offline_payload = _dumps(VisionStatus(online=False).model_dump())
+                    self.client.publish(VISION_STATUS, offline_payload, qos=1, retain=True)
+                except Exception:
+                    pass
             try:
                 self.client.loop_stop()
                 self.client.disconnect()
@@ -159,15 +190,111 @@ class MQTTBridge:
                 break
         return cmds
 
-    def publish_json(self, topic: str, payload: dict[str, Any]) -> None:
+    def publish_json(self, topic: str, payload: dict[str, Any], qos: int = 0, retain: bool = False) -> None:
         """Publish JSON payload over MQTT without blocking."""
         if self.client is None or not self.connected:
             return
         try:
             data = _dumps(payload)
-            self.client.publish(topic, data, qos=0)
+            if retain:
+                self.client.publish(topic, data, qos=qos, retain=True)
+            else:
+                self.client.publish(topic, data, qos=qos)
         except Exception as exc:
             print(f"[MQTTBridge] Publish error on '{topic}': {exc}", file=sys.stderr, flush=True)
+
+    def publish_scene(self, scene_dict: dict[str, Any]) -> None:
+        """Validate scene against Scene model and publish retained context."""
+        if self.client is None or not self.connected:
+            return
+        try:
+            scene = Scene.model_validate(scene_dict)
+            payload_bytes = _dumps(scene.model_dump())
+            self.client.publish(self.ctx_topic, payload_bytes, qos=0, retain=True)
+        except Exception as exc:
+            print(f"[MQTTBridge] Scene publish error on '{self.ctx_topic}': {exc}", file=sys.stderr, flush=True)
+
+    def publish_event(self, event_type: str, data: dict[str, Any]) -> None:
+        """Publish real-time vision event conforming to contract models when applicable."""
+        if self.client is None or not self.connected:
+            return
+
+        norm_type = "object_seen" if event_type == "object_detected" else event_type
+        contract_types = {
+            "face_identified",
+            "person_detected",
+            "person_left",
+            "sign_recognized",
+            "object_seen",
+        }
+
+        if norm_type in contract_types:
+            self._event_counter += 1
+            evt_id = f"evt-{self._event_counter:06d}"
+            now_ts = round(self.clock(), 3)
+            norm_data: dict[str, Any] = {}
+
+            if norm_type == "face_identified":
+                norm_data = {
+                    "track_id": data.get("track_id", data.get("id")),
+                    "name": str(data.get("name", "unknown")),
+                    "conf": float(data.get("conf", data.get("score", 1.0))),
+                }
+            elif norm_type == "person_detected":
+                prox = str(data.get("proximity", "medium"))
+                if prox == "close":
+                    prox = "near"
+                elif prox not in ("near", "medium", "far"):
+                    prox = "medium"
+
+                pos = str(data.get("pos", data.get("position", "center")))
+                if pos not in ("left", "center", "right"):
+                    pos = "center"
+
+                norm_data = {
+                    "track_id": data.get("track_id", data.get("id")),
+                    "pos": pos,
+                    "proximity": prox,
+                }
+            elif norm_type == "person_left":
+                norm_data = {
+                    "track_id": data.get("track_id", data.get("id")),
+                }
+            elif norm_type == "sign_recognized":
+                sign_txt = str(data.get("text") or data.get("sign") or "").lower()
+                norm_data = {
+                    "text": sign_txt,
+                    "conf": float(data.get("conf", 1.0)),
+                }
+            elif norm_type == "object_seen":
+                label_txt = str(data.get("label") or data.get("name") or "")
+                norm_data = {
+                    "label": label_txt,
+                    "conf": float(data.get("conf", data.get("score", 1.0))),
+                }
+
+            raw_payload = {
+                "v": 1,
+                "id": evt_id,
+                "ts": now_ts,
+                "type": norm_type,
+                "data": norm_data,
+            }
+            try:
+                validated_event = EVENT_ADAPTER.validate_python(raw_payload)
+                payload_bytes = _dumps(validated_event.model_dump())
+                self.client.publish(self.event_topic, payload_bytes, qos=1)
+                return
+            except Exception as exc:
+                print(f"[MQTTBridge] Event validation error: {exc}", file=sys.stderr, flush=True)
+
+        payload = {
+            "type": "event",
+            "event": event_type,
+            "timestamp": self.clock(),
+            "data": data,
+        }
+        self.publish_json(self.event_topic, payload, qos=0)
 
     def publish_response(
         self,
@@ -182,27 +309,17 @@ class MQTTBridge:
             "command": command,
             "status": status,
             "request_id": request_id,
-            "timestamp": time.time(),
+            "timestamp": self.clock(),
             "data": data or {},
         }
         self.publish_json(self.resp_topic, payload)
-
-    def publish_event(self, event_type: str, data: dict[str, Any]) -> None:
-        """Publish real-time vision event."""
-        payload = {
-            "type": "event",
-            "event": event_type,
-            "timestamp": time.time(),
-            "data": data,
-        }
-        self.publish_json(self.event_topic, payload)
 
     def publish_context(self, context: dict[str, Any], request_id: str | None = None) -> None:
         """Publish short-term memory visual context snapshot."""
         payload = {
             "type": "context",
             "request_id": request_id,
-            "timestamp": time.time(),
+            "timestamp": self.clock(),
             "context": context,
         }
         self.publish_json(self.ctx_topic, payload)

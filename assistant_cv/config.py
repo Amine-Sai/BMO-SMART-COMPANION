@@ -5,6 +5,13 @@ import os
 import pathlib
 import torch
 
+from bmo_contracts.topics import (
+    VISION_CMD_LEGACY,
+    VISION_CONTEXT,
+    VISION_EVENTS,
+    VISION_RESP_LEGACY,
+)
+
 BASE_DIR = pathlib.Path(__file__).resolve().parent
 MODELS_DIR = BASE_DIR / "models"
 GALLERY_DIR = BASE_DIR / "gallery"
@@ -65,12 +72,14 @@ AUTO_ENROLL_SHOTS = int(os.environ.get("BMO_ENROLL_SHOTS", "8"))
 # MQTT broker settings
 MQTT_HOST = os.environ.get("BMO_MQTT_HOST", "localhost")
 MQTT_PORT = int(os.environ.get("BMO_MQTT_PORT", "1883"))
-MQTT_TOPIC_CMD = os.environ.get("BMO_MQTT_TOPIC_CMD", "bmo/vision/command")
-MQTT_TOPIC_EVENT = os.environ.get("BMO_MQTT_TOPIC_EVENT", "bmo/vision/events")
-MQTT_TOPIC_CTX = os.environ.get("BMO_MQTT_TOPIC_CTX", "bmo/vision/context")
-MQTT_TOPIC_RESP = os.environ.get("BMO_MQTT_TOPIC_RESP", "bmo/vision/response")
+MQTT_TOPIC_CMD = os.environ.get("BMO_MQTT_TOPIC_CMD", VISION_CMD_LEGACY)
+MQTT_TOPIC_EVENT = os.environ.get("BMO_MQTT_TOPIC_EVENT", VISION_EVENTS)
+MQTT_TOPIC_CTX = os.environ.get("BMO_MQTT_TOPIC_CTX", VISION_CONTEXT)
+MQTT_TOPIC_RESP = os.environ.get("BMO_MQTT_TOPIC_RESP", VISION_RESP_LEGACY)
 
-PALM_MODEL_URL = "https://huggingface.co/opencv/palm_detection_mediapipe/resolve/main/palm_detection_mediapipe_2023feb.onnx"
+PALM_MODEL_URL = (
+    "https://huggingface.co/opencv/palm_detection_mediapipe/resolve/main/palm_detection_mediapipe_2023feb.onnx"
+)
 PALM_MODEL_PATH = MODELS_DIR / "palm_detection.onnx"
 HANDPOSE_MODEL_URL = "https://huggingface.co/opencv/handpose_estimation_mediapipe/resolve/main/handpose_estimation_mediapipe_2023feb.onnx"
 HANDPOSE_MODEL_PATH = MODELS_DIR / "handpose_estimation.onnx"
@@ -84,8 +93,20 @@ def _preload_cuda_dlls() -> None:
     if DEVICE != "cuda":
         return
     curand_patterns = [
-        str(BASE_DIR.parent / ".venv" / "lib" / "python*" / "site-packages" / "nvidia" / "curand" / "lib" / "libcurand.so*"),
-        os.path.expanduser("~/.local/share/mise/installs/python/*/lib/python*/site-packages/nvidia/curand/lib/libcurand.so*"),
+        str(
+            BASE_DIR.parent
+            / ".venv"
+            / "lib"
+            / "python*"
+            / "site-packages"
+            / "nvidia"
+            / "curand"
+            / "lib"
+            / "libcurand.so*"
+        ),
+        os.path.expanduser(
+            "~/.local/share/mise/installs/python/*/lib/python*/site-packages/nvidia/curand/lib/libcurand.so*"
+        ),
     ]
     for pat in curand_patterns:
         for p in glob.glob(pat):

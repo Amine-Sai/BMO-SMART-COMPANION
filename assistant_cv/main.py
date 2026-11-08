@@ -50,7 +50,7 @@ try:
     from .faces import FaceIdentifier
     from .hands import has_palms
     from .live_sign import get_recognizer
-    from .memory import PersonFaceSynchronizer, ShortTermMemory
+    from .memory import PersonFaceSynchronizer, ShortTermMemory, get_proximity, get_screen_position
     from .mqtt_bridge import MQTTBridge
     from .objects import get_detector
 except ImportError:
@@ -76,7 +76,7 @@ except ImportError:
     from faces import FaceIdentifier
     from hands import has_palms
     from live_sign import get_recognizer
-    from memory import PersonFaceSynchronizer, ShortTermMemory
+    from memory import PersonFaceSynchronizer, ShortTermMemory, get_proximity, get_screen_position
     from mqtt_bridge import MQTTBridge
     from objects import get_detector
 
@@ -406,6 +406,7 @@ class EventDetector:
         self.prev_person_count = 0
         self.pending_person_count = 0
         self.person_stable_frames = 0
+        self.prev_person_tracks: dict[int, dict[str, Any]] = {}
 
         self.prev_known_faces: set[str] = set()
         self.prev_sign: str | None = None
@@ -441,35 +442,86 @@ class EventDetector:
                 diff = self.pending_person_count - self.prev_person_count
                 ev = f"[{now_str}] Person entered (+{diff})"
                 new_events.append(ev)
-                self._emit("person_detected", {"count": self.pending_person_count, "diff": diff})
+                first_p = persons[0] if persons else {}
+                tid = first_p.get("id") or first_p.get("track_id")
+                bbox = first_p.get("bbox", (0, 0, 0, 0))
+                pos = first_p.get("position") or get_screen_position(bbox)
+                prox = first_p.get("proximity") or get_proximity(bbox)
+                if prox == "close":
+                    prox = "near"
+                self._emit(
+                    "person_detected",
+                    {
+                        "track_id": tid,
+                        "pos": pos,
+                        "proximity": prox,
+                        "count": self.pending_person_count,
+                        "diff": diff,
+                    },
+                )
             elif self.pending_person_count < self.prev_person_count:
                 diff = self.prev_person_count - self.pending_person_count
                 ev = f"[{now_str}] Person left (-{diff})"
                 new_events.append(ev)
-                self._emit("person_left", {"count": self.pending_person_count, "diff": diff})
+                curr_ids = {
+                    (p.get("id") or p.get("track_id"))
+                    for p in persons
+                    if (p.get("id") or p.get("track_id")) is not None
+                }
+                left_ids = set(self.prev_person_tracks.keys()) - curr_ids
+                left_tid = next(iter(left_ids)) if left_ids else None
+                self._emit(
+                    "person_left",
+                    {
+                        "track_id": left_tid,
+                        "count": self.pending_person_count,
+                        "diff": diff,
+                    },
+                )
             self.prev_person_count = self.pending_person_count
+
+        self.prev_person_tracks = {
+            (p.get("id") or p.get("track_id")): p for p in persons if (p.get("id") or p.get("track_id")) is not None
+        }
 
         # 2. Face recognition event
         curr_known = {name for name, score, _ in faces if name.lower() not in ("unknown", "none")}
         for name in curr_known - self.prev_known_faces:
             ev = f"[{now_str}] Face recognized: {name}"
             new_events.append(ev)
-            self._emit("face_identified", {"name": name})
+            face_conf = 1.0
+            face_box = (0, 0, 0, 0)
+            for fname, fscore, fbbox in faces:
+                if fname == name:
+                    face_conf = float(fscore)
+                    face_box = fbbox
+                    break
+            tid = None
+            fcx = (face_box[0] + face_box[2]) / 2.0
+            fcy = (face_box[1] + face_box[3]) / 2.0
+            for p in persons:
+                px1, py1, px2, py2 = p.get("bbox", (0, 0, 0, 0))
+                if px1 <= fcx <= px2 and py1 <= fcy <= py2:
+                    tid = p.get("id") or p.get("track_id")
+                    break
+            self._emit("face_identified", {"track_id": tid, "name": name, "conf": round(face_conf, 2)})
         self.prev_known_faces = curr_known
 
         # 3. Sign recognition event
         if sign and sign != self.prev_sign and sign.lower() != "none":
-            ev = f"[{now_str}] Sign: {sign.upper()} ({sign_conf*100:.0f}%)"
+            ev = f"[{now_str}] Sign: {sign.upper()} ({sign_conf * 100:.0f}%)"
             new_events.append(ev)
-            self._emit("sign_recognized", {"sign": sign, "conf": round(sign_conf, 2)})
+            self._emit("sign_recognized", {"text": sign.lower(), "sign": sign, "conf": round(sign_conf, 2)})
         self.prev_sign = sign
 
         # 4. Non-person object detection events with 2-frame debounce
         curr_obj_counts: dict[str, int] = {}
+        curr_obj_confs: dict[str, float] = {}
         for o in objects:
             lbl = str(o.get("registered_name") or o.get("label", "")).lower()
             if lbl and lbl != "person":
                 curr_obj_counts[lbl] = curr_obj_counts.get(lbl, 0) + 1
+                curr_obj_confs[lbl] = max(curr_obj_confs.get(lbl, 0.0), float(o.get("conf", 1.0)))
 
         if curr_obj_counts != self.pending_object_counts:
             self.pending_object_counts = curr_obj_counts.copy()
@@ -483,9 +535,13 @@ class EventDetector:
                 c_now = self.pending_object_counts.get(lbl, 0)
                 c_prev = self.prev_object_counts.get(lbl, 0)
                 if c_now > c_prev:
+                    conf = curr_obj_confs.get(lbl, 1.0)
                     ev = f"[{now_str}] Object detected: {lbl} (+{c_now - c_prev})"
                     new_events.append(ev)
-                    self._emit("object_detected", {"label": lbl, "count": c_now, "diff": c_now - c_prev})
+                    self._emit(
+                        "object_seen",
+                        {"label": lbl, "conf": round(conf, 2), "count": c_now, "diff": c_now - c_prev},
+                    )
                 elif c_now < c_prev:
                     ev = f"[{now_str}] Object removed: {lbl} (-{c_prev - c_now})"
                     new_events.append(ev)
@@ -579,6 +635,8 @@ def run_pipeline(
     obj_latency: float = 0.0
     cached_detections: list[dict[str, Any]] = []
     last_context_pub_time = 0.0
+    last_scene_pub_time = 0.0
+    last_scene_sig: Any = None
 
     print("\nInteractive Hotkeys:")
     print("  1 / 2 / 3 : Toggle Objects, Face ID, or Sign Language modules")
@@ -662,24 +720,37 @@ def run_pipeline(
                                 events_log.append(f"Deleted identity: {del_name}")
                                 mqtt_bridge.publish_response(cmd_type, "success", {"name": del_name}, req_id)
                             else:
-                                mqtt_bridge.publish_response(cmd_type, "not_found", {"name": del_name, "error": f"Person '{del_name}' not found"}, req_id)
+                                mqtt_bridge.publish_response(
+                                    cmd_type,
+                                    "not_found",
+                                    {"name": del_name, "error": f"Person '{del_name}' not found"},
+                                    req_id,
+                                )
 
                     elif cmd_type == "rename_person":
                         old_name = str(cmd.get("old_name", "")).strip()
                         new_name = str(cmd.get("new_name", "")).strip()
                         if not old_name or not new_name:
-                            mqtt_bridge.publish_response(cmd_type, "error", {"error": "Missing old_name or new_name"}, req_id)
+                            mqtt_bridge.publish_response(
+                                cmd_type, "error", {"error": "Missing old_name or new_name"}, req_id
+                            )
                         else:
                             ok = face_worker.identifier.rename_identity(old_name, new_name)
                             if ok:
                                 events_log.append(f"Renamed '{old_name}' -> '{new_name}'")
-                                mqtt_bridge.publish_response(cmd_type, "success", {"old_name": old_name, "new_name": new_name}, req_id)
+                                mqtt_bridge.publish_response(
+                                    cmd_type, "success", {"old_name": old_name, "new_name": new_name}, req_id
+                                )
                             else:
-                                mqtt_bridge.publish_response(cmd_type, "error", {"error": f"Failed to rename '{old_name}'"}, req_id)
+                                mqtt_bridge.publish_response(
+                                    cmd_type, "error", {"error": f"Failed to rename '{old_name}'"}, req_id
+                                )
 
                     elif cmd_type in ("list_persons", "list_identities", "get_roster"):
                         roster = face_worker.identifier.registry.list_identities()
-                        mqtt_bridge.publish_response(cmd_type, "success", {"persons": roster, "count": len(roster)}, req_id)
+                        mqtt_bridge.publish_response(
+                            cmd_type, "success", {"persons": roster, "count": len(roster)}, req_id
+                        )
 
                     elif cmd_type == "set_object_classes":
                         classes = cmd.get("classes")
@@ -689,7 +760,9 @@ def run_pipeline(
                             events_log.append(f"Classes updated ({len(new_classes)} items)")
                             mqtt_bridge.publish_response(cmd_type, "success", {"classes": new_classes}, req_id)
                         else:
-                            mqtt_bridge.publish_response(cmd_type, "error", {"error": "Missing or invalid classes list"}, req_id)
+                            mqtt_bridge.publish_response(
+                                cmd_type, "error", {"error": "Missing or invalid classes list"}, req_id
+                            )
 
                     elif cmd_type in ("recheck_face", "reverify_face"):
                         track_id = cmd.get("track_id")
@@ -716,7 +789,9 @@ def run_pipeline(
                             if shots <= 0:
                                 obj_detector.register_class(target_name, syns)
                                 events_log.append(f"Registered object class: {target_name}")
-                                mqtt_bridge.publish_response(cmd_type, "success", {"name": target_name, "mode": "text"}, req_id)
+                                mqtt_bridge.publish_response(
+                                    cmd_type, "success", {"name": target_name, "mode": "text"}, req_id
+                                )
                             else:
                                 auto_object_enroll_session = AutoObjectEnrollSession(
                                     name=target_name,
@@ -726,7 +801,9 @@ def run_pipeline(
                                     registry=obj_detector.registry,
                                 )
                                 events_log.append(f"Started object enroll for '{target_name}'")
-                                mqtt_bridge.publish_response(cmd_type, "started", {"name": target_name, "shots": shots}, req_id)
+                                mqtt_bridge.publish_response(
+                                    cmd_type, "started", {"name": target_name, "shots": shots}, req_id
+                                )
 
                     elif cmd_type in ("delete_object", "forget_object"):
                         target_name = str(cmd.get("name", "")).strip()
@@ -739,25 +816,33 @@ def run_pipeline(
                                 events_log.append(f"Deleted object: {target_name}")
                                 mqtt_bridge.publish_response(cmd_type, "success", {"name": target_name}, req_id)
                             else:
-                                mqtt_bridge.publish_response(cmd_type, "not_found", {"name": target_name, "error": msg}, req_id)
+                                mqtt_bridge.publish_response(
+                                    cmd_type, "not_found", {"name": target_name, "error": msg}, req_id
+                                )
 
                     elif cmd_type == "rename_object":
                         old_name = str(cmd.get("old_name", "")).strip()
                         new_name = str(cmd.get("new_name", "")).strip()
                         if not old_name or not new_name:
-                            mqtt_bridge.publish_response(cmd_type, "error", {"error": "Missing old_name or new_name"}, req_id)
+                            mqtt_bridge.publish_response(
+                                cmd_type, "error", {"error": "Missing old_name or new_name"}, req_id
+                            )
                         else:
                             ok, msg = obj_detector.registry.rename_object(old_name, new_name)
                             if ok:
                                 obj_detector.reload_classes()
                                 events_log.append(f"Renamed object: '{old_name}' -> '{new_name}'")
-                                mqtt_bridge.publish_response(cmd_type, "success", {"old_name": old_name, "new_name": new_name}, req_id)
+                                mqtt_bridge.publish_response(
+                                    cmd_type, "success", {"old_name": old_name, "new_name": new_name}, req_id
+                                )
                             else:
                                 mqtt_bridge.publish_response(cmd_type, "error", {"error": msg}, req_id)
 
                     elif cmd_type in ("list_objects", "get_objects"):
                         roster = obj_detector.registry.list_objects()
-                        mqtt_bridge.publish_response(cmd_type, "success", {"objects": roster, "count": len(roster)}, req_id)
+                        mqtt_bridge.publish_response(
+                            cmd_type, "success", {"objects": roster, "count": len(roster)}, req_id
+                        )
 
             # ---------------------------------------------------------------
             # 2. Objects & Person Detection (Decoupled at fps / 3 stride)
@@ -825,7 +910,9 @@ def run_pipeline(
             # ---------------------------------------------------------------
             needs_face = False
             if toggles["2:FACE"]:
-                if auto_enroll_session is not None and not (auto_enroll_session.completed or auto_enroll_session.failed):
+                if auto_enroll_session is not None and not (
+                    auto_enroll_session.completed or auto_enroll_session.failed
+                ):
                     needs_face = True
                 elif not toggles["L:LAZY"]:
                     needs_face = True
@@ -910,12 +997,27 @@ def run_pipeline(
                 if len(events_log) > 6:
                     events_log.pop(0)
 
-            # Periodic context broadcast over MQTT (every 5 seconds if someone is present)
+            # Context & Scene publishing
             now_sec = time.time()
-            if mqtt_bridge is not None and (now_sec - last_context_pub_time > 5.0):
-                if person_present or short_term_memory.current_objects:
-                    mqtt_bridge.publish_context(short_term_memory.get_llm_context())
-                    last_context_pub_time = now_sec
+            if mqtt_bridge is not None:
+                scene_contract = short_term_memory.get_scene_contract()
+                scene_sig = (
+                    tuple(
+                        (p.get("track_id"), p.get("name"), p.get("pos"), p.get("proximity"))
+                        for p in scene_contract["people"]
+                    ),
+                    tuple(scene_contract["objects"]),
+                    (scene_contract["last_sign"]["text"] if scene_contract["last_sign"] else None),
+                )
+                if scene_sig != last_scene_sig and (now_sec - last_scene_pub_time >= 1.0):
+                    mqtt_bridge.publish_scene(scene_contract)
+                    last_scene_sig = scene_sig
+                    last_scene_pub_time = now_sec
+
+                if now_sec - last_context_pub_time > 5.0:
+                    if person_present or short_term_memory.current_objects:
+                        mqtt_bridge.publish_context(short_term_memory.get_llm_context())
+                        last_context_pub_time = now_sec
 
             # ---------------------------------------------------------------
             # 7. Build HUD State & Render
