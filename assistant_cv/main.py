@@ -13,11 +13,19 @@ Integrates:
 from __future__ import annotations
 
 import argparse
+import logging
 import pathlib
 import sys
 import threading
 import time
 from typing import Any
+import warnings
+
+# Suppress library deprecation and empty line warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=ResourceWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+logging.getLogger("ultralytics").setLevel(logging.ERROR)
 
 import cv2 as cv
 import numpy as np
@@ -34,6 +42,7 @@ try:
         MEMORY_WINDOW_SEC,
         MQTT_HOST,
         MQTT_PORT,
+        OBJ_FRAME_STRIDE,
         SEQ_LEN,
         SIGN_CONF,
     )
@@ -59,6 +68,7 @@ except ImportError:
         MEMORY_WINDOW_SEC,
         MQTT_HOST,
         MQTT_PORT,
+        OBJ_FRAME_STRIDE,
         SEQ_LEN,
         SIGN_CONF,
     )
@@ -386,16 +396,24 @@ class AsyncSignWorker:
 
 
 # ---------------------------------------------------------------------------
-# Edge-Triggered Event Detector with Bridge Forwarding
+# Edge-Triggered Event Detector with Bridge Forwarding & Debouncing
 # ---------------------------------------------------------------------------
 class EventDetector:
-    """Detects transitions and emits structured events for MQTT / Console."""
+    """Detects transitions and emits structured events for MQTT / Console with temporal debouncing."""
 
     def __init__(self, mqtt_bridge: MQTTBridge | None = None) -> None:
         self.mqtt_bridge = mqtt_bridge
         self.prev_person_count = 0
+        self.pending_person_count = 0
+        self.person_stable_frames = 0
+
         self.prev_known_faces: set[str] = set()
         self.prev_sign: str | None = None
+
+        self.prev_object_counts: dict[str, int] = {}
+        self.pending_object_counts: dict[str, int] = {}
+        self.object_stable_frames = 0
+
         self.history: list[str] = []
 
     def update(
@@ -408,20 +426,28 @@ class EventDetector:
         new_events: list[str] = []
         now_str = time.strftime("%H:%M:%S")
 
-        # 1. Person entry/exit
+        # 1. Person entry/exit with 2-frame debounce (seen 2 consecutive times)
         persons = [o for o in objects if str(o.get("label", "")).lower() == "person"]
         curr_person_count = len(persons)
-        if curr_person_count > self.prev_person_count:
-            diff = curr_person_count - self.prev_person_count
-            ev = f"[{now_str}] Person entered (+{diff})"
-            new_events.append(ev)
-            self._emit("person_detected", {"count": curr_person_count, "diff": diff})
-        elif curr_person_count < self.prev_person_count:
-            diff = self.prev_person_count - curr_person_count
-            ev = f"[{now_str}] Person left (-{diff})"
-            new_events.append(ev)
-            self._emit("person_left", {"count": curr_person_count, "diff": diff})
-        self.prev_person_count = curr_person_count
+
+        if curr_person_count != self.pending_person_count:
+            self.pending_person_count = curr_person_count
+            self.person_stable_frames = 0
+        else:
+            self.person_stable_frames += 1
+
+        if self.person_stable_frames >= 1 and self.pending_person_count != self.prev_person_count:
+            if self.pending_person_count > self.prev_person_count:
+                diff = self.pending_person_count - self.prev_person_count
+                ev = f"[{now_str}] Person entered (+{diff})"
+                new_events.append(ev)
+                self._emit("person_detected", {"count": self.pending_person_count, "diff": diff})
+            elif self.pending_person_count < self.prev_person_count:
+                diff = self.prev_person_count - self.pending_person_count
+                ev = f"[{now_str}] Person left (-{diff})"
+                new_events.append(ev)
+                self._emit("person_left", {"count": self.pending_person_count, "diff": diff})
+            self.prev_person_count = self.pending_person_count
 
         # 2. Face recognition event
         curr_known = {name for name, score, _ in faces if name.lower() not in ("unknown", "none")}
@@ -437,6 +463,34 @@ class EventDetector:
             new_events.append(ev)
             self._emit("sign_recognized", {"sign": sign, "conf": round(sign_conf, 2)})
         self.prev_sign = sign
+
+        # 4. Non-person object detection events with 2-frame debounce
+        curr_obj_counts: dict[str, int] = {}
+        for o in objects:
+            lbl = str(o.get("registered_name") or o.get("label", "")).lower()
+            if lbl and lbl != "person":
+                curr_obj_counts[lbl] = curr_obj_counts.get(lbl, 0) + 1
+
+        if curr_obj_counts != self.pending_object_counts:
+            self.pending_object_counts = curr_obj_counts.copy()
+            self.object_stable_frames = 0
+        else:
+            self.object_stable_frames += 1
+
+        if self.object_stable_frames >= 1 and self.pending_object_counts != self.prev_object_counts:
+            all_labels = set(self.pending_object_counts.keys()) | set(self.prev_object_counts.keys())
+            for lbl in all_labels:
+                c_now = self.pending_object_counts.get(lbl, 0)
+                c_prev = self.prev_object_counts.get(lbl, 0)
+                if c_now > c_prev:
+                    ev = f"[{now_str}] Object detected: {lbl} (+{c_now - c_prev})"
+                    new_events.append(ev)
+                    self._emit("object_detected", {"label": lbl, "count": c_now, "diff": c_now - c_prev})
+                elif c_now < c_prev:
+                    ev = f"[{now_str}] Object removed: {lbl} (-{c_prev - c_now})"
+                    new_events.append(ev)
+                    self._emit("object_removed", {"label": lbl, "count": c_now, "diff": c_prev - c_now})
+            self.prev_object_counts = self.pending_object_counts.copy()
 
         for e in new_events:
             self.history.append(e)
@@ -523,6 +577,7 @@ def run_pipeline(
     start_time = time.perf_counter()
 
     obj_latency: float = 0.0
+    cached_detections: list[dict[str, Any]] = []
     last_context_pub_time = 0.0
 
     print("\nInteractive Hotkeys:")
@@ -705,17 +760,26 @@ def run_pipeline(
                         mqtt_bridge.publish_response(cmd_type, "success", {"objects": roster, "count": len(roster)}, req_id)
 
             # ---------------------------------------------------------------
-            # 2. Objects & Person Detection (~30 Hz)
+            # 2. Objects & Person Detection (Decoupled at fps / 3 stride)
             # ---------------------------------------------------------------
             detections: list[dict[str, Any]] = []
             if toggles["1:OBJ"]:
-                t_obj0 = time.perf_counter()
-                detections = obj_detector.detect(
-                    frame,
-                    persons_only=False,
-                    track=toggles["T:TRK"],
+                run_det = (
+                    (auto_object_enroll_session is not None)
+                    or (frame_count % OBJ_FRAME_STRIDE == 0)
+                    or not cached_detections
                 )
-                obj_latency = (time.perf_counter() - t_obj0) * 1000.0
+                if run_det:
+                    t_obj0 = time.perf_counter()
+                    detections = obj_detector.detect(
+                        frame,
+                        persons_only=False,
+                        track=toggles["T:TRK"],
+                    )
+                    obj_latency = (time.perf_counter() - t_obj0) * 1000.0
+                    cached_detections = detections
+                else:
+                    detections = cached_detections
 
             # Step active object enrollment session if running
             object_enroll_info: dict[str, Any] | None = None

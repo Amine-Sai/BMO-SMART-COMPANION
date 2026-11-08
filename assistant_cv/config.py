@@ -17,6 +17,7 @@ for _dir in (MODELS_DIR, GALLERY_DIR, OBJECT_GALLERY_DIR, DATA_DIR):
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 CAM_INDEX = int(os.environ.get("BMO_CAM", "0"))
 MAX_FPS = int(os.environ.get("BMO_MAX_FPS", "60"))
+OBJ_FRAME_STRIDE = int(os.environ.get("BMO_OBJ_STRIDE", "3"))
 OBJ_CONF = float(os.environ.get("BMO_OBJ_CONF", "0.50"))
 FACE_TAU = float(os.environ.get("BMO_FACE_TAU", "0.45"))
 OBJECT_TAU = float(os.environ.get("BMO_OBJECT_TAU", "0.65"))

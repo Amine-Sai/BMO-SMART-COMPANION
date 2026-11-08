@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import pathlib
 import sys
 import time
 from typing import Any, Sequence
+import warnings
+
+# Suppress library deprecation and empty line warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=ResourceWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+logging.getLogger("ultralytics").setLevel(logging.ERROR)
 
 import cv2
 import numpy as np
@@ -22,6 +30,7 @@ from assistant_cv.config import (
     DEVICE,
     MAX_FPS,
     OBJ_CONF,
+    OBJ_FRAME_STRIDE,
     OBJ_MODEL_TYPE,
     YOLO_MODEL_PATH,
     YOLO_WORLD_MODEL_PATH,
@@ -308,6 +317,8 @@ def main() -> None:
 
     fps = 0.0
     prev_t = time.perf_counter()
+    frame_idx = 0
+    cached_detections: list[dict[str, Any]] = []
 
     try:
         while True:
@@ -316,14 +327,20 @@ def main() -> None:
             if not ok or frame is None:
                 break
 
-            t0 = time.perf_counter()
-            detections = detector.detect(
-                frame,
-                conf=args.conf,
-                persons_only=persons_only,
-                track=track,
-            )
-            infer_ms = (time.perf_counter() - t0) * 1000.0
+            frame_idx += 1
+            infer_ms = 0.0
+            if (frame_idx % OBJ_FRAME_STRIDE == 0) or not cached_detections:
+                t0 = time.perf_counter()
+                detections = detector.detect(
+                    frame,
+                    conf=args.conf,
+                    persons_only=persons_only,
+                    track=track,
+                )
+                infer_ms = (time.perf_counter() - t0) * 1000.0
+                cached_detections = detections
+            else:
+                detections = cached_detections
 
             now = time.perf_counter()
             dt = max(now - prev_t, 1e-6)

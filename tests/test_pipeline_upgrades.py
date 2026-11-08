@@ -153,5 +153,102 @@ class TestMQTTBridgeSerialization(unittest.TestCase):
         self.assertEqual(cmds[0]["request_id"], "99")
 
 
+from assistant_cv.config import OBJ_FRAME_STRIDE
+from assistant_cv.main import EventDetector
+
+
+class TestEventDetectorDebounce(unittest.TestCase):
+    """Test EventDetector temporal debounce and object appearance/removal events."""
+
+    def setUp(self):
+        self.emitted = []
+        self.detector = EventDetector()
+        self.detector._emit = lambda ev_type, data: self.emitted.append((ev_type, data))
+
+    def test_person_entry_exit_debounce(self):
+        person_obj = [{"label": "person", "conf": 0.9, "bbox": (10, 10, 100, 200)}]
+
+        # Frame 1: 1 person appears -> pending (no event yet)
+        self.detector.update(objects=person_obj, faces=[], sign=None, sign_conf=0.0)
+        self.assertEqual(len(self.emitted), 0)
+
+        # Frame 2: 1 person still present -> confirmed (person_detected emitted)
+        self.detector.update(objects=person_obj, faces=[], sign=None, sign_conf=0.0)
+        self.assertEqual(len(self.emitted), 1)
+        self.assertEqual(self.emitted[0][0], "person_detected")
+        self.assertEqual(self.emitted[0][1]["count"], 1)
+
+        # Frame 3: momentary 1-frame dropout -> absorbed by debounce (no event emitted)
+        self.detector.update(objects=[], faces=[], sign=None, sign_conf=0.0)
+        self.assertEqual(len(self.emitted), 1)
+
+        # Frame 4: person restored -> absorbed, stable count remains 1
+        self.detector.update(objects=person_obj, faces=[], sign=None, sign_conf=0.0)
+        self.assertEqual(len(self.emitted), 1)
+
+        # Frame 5: person truly leaves -> pending
+        self.detector.update(objects=[], faces=[], sign=None, sign_conf=0.0)
+        self.assertEqual(len(self.emitted), 1)
+
+        # Frame 6: person truly gone -> confirmed (person_left emitted)
+        self.detector.update(objects=[], faces=[], sign=None, sign_conf=0.0)
+        self.assertEqual(len(self.emitted), 2)
+        self.assertEqual(self.emitted[1][0], "person_left")
+        self.assertEqual(self.emitted[1][1]["count"], 0)
+
+    def test_object_appearance_and_removal(self):
+        lighter_obj = [{"label": "lighter", "conf": 0.85, "bbox": (50, 50, 80, 120)}]
+
+        # Frame 1: lighter appears -> pending
+        self.detector.update(objects=lighter_obj, faces=[], sign=None, sign_conf=0.0)
+        self.assertEqual(len(self.emitted), 0)
+
+        # Frame 2: lighter still present -> confirmed (object_detected emitted)
+        self.detector.update(objects=lighter_obj, faces=[], sign=None, sign_conf=0.0)
+        self.assertEqual(len(self.emitted), 1)
+        self.assertEqual(self.emitted[0][0], "object_detected")
+        self.assertEqual(self.emitted[0][1]["label"], "lighter")
+        self.assertEqual(self.emitted[0][1]["count"], 1)
+
+        # Frame 3 & 4: lighter removed -> confirmed (object_removed emitted)
+        self.detector.update(objects=[], faces=[], sign=None, sign_conf=0.0)
+        self.assertEqual(len(self.emitted), 1)
+        self.detector.update(objects=[], faces=[], sign=None, sign_conf=0.0)
+        self.assertEqual(len(self.emitted), 2)
+        self.assertEqual(self.emitted[1][0], "object_removed")
+        self.assertEqual(self.emitted[1][1]["label"], "lighter")
+
+
+class TestDecoupledDetectionCadence(unittest.TestCase):
+    """Test object detection frame-stride decoupling logic."""
+
+    def test_default_stride(self):
+        self.assertEqual(OBJ_FRAME_STRIDE, 3)
+
+    def test_stride_cadence_simulation(self):
+        cached_detections = []
+        detector_invocations = 0
+
+        def mock_detect():
+            nonlocal detector_invocations
+            detector_invocations += 1
+            return [{"label": "lighter", "conf": 0.8}]
+
+        # Simulate 12 frames
+        for frame_count in range(1, 13):
+            run_det = (frame_count % OBJ_FRAME_STRIDE == 0) or not cached_detections
+            if run_det:
+                detections = mock_detect()
+                cached_detections = detections
+            else:
+                detections = cached_detections
+
+            self.assertEqual(len(detections), 1)
+            self.assertEqual(detections[0]["label"], "lighter")
+
+        # In 12 frames, detection should run on frame 1 (initialization), then 3, 6, 9, 12 -> 5 times
+        self.assertEqual(detector_invocations, 5)
+
+
 if __name__ == "__main__":
     unittest.main()
