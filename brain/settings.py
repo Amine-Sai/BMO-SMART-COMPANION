@@ -1,50 +1,80 @@
+"""Application settings loaded from YAML configuration files."""
+
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
 import yaml
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class LLMSettings(BaseModel):
+    """Configuration for LLM clients."""
+
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    model: str
-    host: str
-    num_ctx: int
-    keep_alive: str | int
-    timeout_s: float
-    temperature: float
+    model: str = "llama3.2:3b"
+    host: str = "http://localhost:11434"
+    num_ctx: int = 4096
+    keep_alive: str = "5m"
+    timeout_s: float = 30.0
+    temperature: float = 0.7
 
 
 class SceneSettings(BaseModel):
+    """Configuration for scene perception and state."""
+
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    max_age_s: float
+    max_age_s: float = 60.0
+
+
+class AudioSettings(BaseModel):
+    """Configuration for audio capture, VAD, STT, and TTS."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    sample_rate: int = 16000
+    frame_ms: int = 20
+    wake_threshold: float = 0.5
+    vad_threshold: float = 0.5
+    vad_min_silence_ms: int = 400
+    stt_model: str = "base.en"
+    stt_device: str = "cpu"
+    stt_compute_type: str = "int8"
+    tts_voice: str = "en_US-lessac-medium"
 
 
 class Settings(BaseModel):
+    """Root configuration holding all subsystem settings."""
+
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    llm: LLMSettings
-    scene: SceneSettings | None = None
-    audio: Any | None = None
-    policy: Any | None = None
+    llm: LLMSettings = Field(default_factory=LLMSettings)
+    scene: SceneSettings = Field(default_factory=SceneSettings)
+    audio: AudioSettings | None = None
 
 
-def load_settings(settings_dir: Path | str = "config/settings.d") -> Settings:
-    directory = Path(settings_dir)
-    if not directory.is_dir():
-        raise FileNotFoundError(f"Settings directory not found: {directory}")
+def load_settings(config_dir: str | Path = "config/settings.d") -> Settings:
+    """Load and merge configuration files from config_dir or settings.d."""
+    path = Path(config_dir)
+    if not path.exists():
+        raise FileNotFoundError(f"Configuration path does not exist: {path}")
 
-    payload: dict[str, Any] = {}
-    for yaml_path in sorted(directory.glob("*.yaml")):
-        content = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+    if path.is_file():
+        files = [path]
+    else:
+        target_dir = path / "settings.d" if (path / "settings.d").is_dir() else path
+        files = sorted(target_dir.glob("*.yaml"))
+
+    merged: dict[str, Any] = {}
+    for file_path in files:
+        content = yaml.safe_load(file_path.read_text(encoding="utf-8"))
         if not isinstance(content, dict):
-            raise ValueError(f"YAML file must contain a top-level mapping: {yaml_path}")
-        for section_key, section_data in content.items():
-            if section_key in payload:
-                raise ValueError(f"Duplicate top-level key {section_key!r} found in {yaml_path.name}")
-            payload[section_key] = section_data
+            raise ValueError(f"Expected top-level mapping in {file_path}, got {type(content).__name__}")
+        for key, value in content.items():
+            if key in merged:
+                raise ValueError(f"Duplicate top-level key '{key}' found in {file_path}")
+            merged[key] = value
 
-    return Settings.model_validate(payload)
+    return Settings.model_validate(merged)
