@@ -1,0 +1,24 @@
+/* Auto-generated from config/limits.yaml - DO NOT EDIT MANUALLY */
+#ifndef BMO_LIMITS_H
+#define BMO_LIMITS_H
+
+#define SERVO_PAN_MIN_DEG -60.0f
+#define SERVO_PAN_MAX_DEG 60.0f
+#define SERVO_PAN_BOOT_DEG 0.0f
+
+#define SERVO_TILT_MIN_DEG -30.0f
+#define SERVO_TILT_MAX_DEG 45.0f
+#define SERVO_TILT_BOOT_DEG 0.0f
+
+#define SERVO_LEFT_ARM_MIN_DEG 0.0f
+#define SERVO_LEFT_ARM_MAX_DEG 120.0f
+#define SERVO_LEFT_ARM_BOOT_DEG 0.0f
+
+#define SERVO_RIGHT_ARM_MIN_DEG 0.0f
+#define SERVO_RIGHT_ARM_MAX_DEG 120.0f
+#define SERVO_RIGHT_ARM_BOOT_DEG 0.0f
+
+#define SERVO_MAX_DEG_PER_SEC 90.0f
+#define SERVO_WATCHDOG_TIMEOUT_MS 3000
+
+#endif /* BMO_LIMITS_H */
