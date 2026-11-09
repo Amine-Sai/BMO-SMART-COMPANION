@@ -1,0 +1,345 @@
+from __future__ import annotations
+
+import threading
+import time
+from typing import Any
+
+import numpy as np
+
+from bmo_contracts.models import BrainSay, Emotion
+from bmo_contracts.topics import BRAIN_SAY
+from brain.audio.io import AudioSink, AudioSource, MemorySink, MemorySource
+from brain.audio.stt import STTResult, SpeechToText
+from brain.audio.tts import TextToSpeech
+from brain.audio.vad import VoiceActivityDetector
+from brain.audio.wake import WakeWordDetector
+from brain.llm import ChatChunk, LLMClient
+from brain.prompt import PromptBuilder
+from brain.state import BrainState, BrainStateMachine
+from brain.tools.registry import ToolRegistry
+from brain.turn import TurnManager
+
+
+def _noop_publish(_topic: str, _payload: bytes, _qos: int = 1, _retain: bool = False) -> None:
+    pass
+
+
+class DummyWake(WakeWordDetector):
+    def __init__(self, score: float = 0.0) -> None:
+        self.score = score
+
+    def score_frame(self, frame: np.ndarray) -> float:
+        _ = frame
+        return self.score
+
+    def process_frame(self, frame: np.ndarray) -> bool:
+        return self.score_frame(frame) >= 0.5
+
+
+class DummyVAD(VoiceActivityDetector):
+    def __init__(self, utterance: bytes | None = None) -> None:
+        self.utterance = utterance
+
+    def is_speech(self, frame: np.ndarray) -> bool:
+        _ = frame
+        return True
+
+    def collect_utterance(self, source: AudioSource) -> bytes | None:
+        _ = source
+        return self.utterance
+
+
+class DummySTT(SpeechToText):
+    def __init__(self, text: str = "Hello BMO") -> None:
+        self.text = text
+
+    def transcribe(self, pcm: bytes) -> STTResult | None:
+        _ = pcm
+        return STTResult(text=self.text, latency_ms=12.5, confidence=0.98)
+
+
+class DummyTTS(TextToSpeech):
+    def __init__(self, chunk_delay: float = 0.0) -> None:
+        self.chunk_delay = chunk_delay
+        self.cancelled = False
+        self.spoken: list[str] = []
+
+    def speak_sentence(
+        self,
+        text: str,
+        sink: AudioSink,
+        cancel_event: threading.Event | None = None,
+    ) -> None:
+        self.spoken.append(text)
+        if self.chunk_delay > 0:
+            t_end = time.perf_counter() + self.chunk_delay
+            while time.perf_counter() < t_end:
+                if cancel_event is not None and cancel_event.is_set():
+                    return
+                time.sleep(0.005)
+        if cancel_event is not None and cancel_event.is_set():
+            return
+        for m in ("play", "write_chunk", "play_chunk", "write_frame", "play_frame", "push", "write"):
+            if hasattr(sink, m):
+                try:
+                    getattr(sink, m)(b"\x00" * 320)
+                    break
+                except Exception:
+                    pass
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+
+class DummyLLM(LLMClient):
+    def __init__(self, text: str = "Hi there friend!") -> None:
+        self._text = text
+
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        stream: bool = False,
+        cancel_event: threading.Event | None = None,
+    ):
+        _ = (messages, tools, stream, cancel_event)
+        if self._text:
+            yield ChatChunk(text=self._text)
+
+
+class SlowLLMClient(LLMClient):
+    def __init__(self, chunks: list[str], chunk_delay: float = 0.02) -> None:
+        self._chunks = chunks
+        self._delay = chunk_delay
+
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        stream: bool = False,
+        cancel_event: threading.Event | None = None,
+    ):
+        _ = (messages, tools, stream)
+        for c in self._chunks:
+            if cancel_event is not None and cancel_event.is_set():
+                break
+            time.sleep(self._delay)
+            if cancel_event is not None and cancel_event.is_set():
+                break
+            yield ChatChunk(text=c)
+
+
+class DummyPromptBuilder(PromptBuilder):
+    def __init__(self) -> None:
+        pass
+
+    def build_messages(self, user_text: str) -> list[dict[str, Any]]:
+        return [{"role": "user", "content": user_text}]
+
+    def record_turn(self, user_text: str, assistant_text: str) -> None:
+        _ = (user_text, assistant_text)
+
+
+def test_full_voice_turn() -> None:
+    sm = BrainStateMachine(publish_fn=_noop_publish)
+    wake = DummyWake(score=0.95)
+    vad = DummyVAD(utterance=b"\x00" * 1600)
+    stt = DummySTT(text="Hello BMO")
+    llm = DummyLLM(text="Hi there friend!")
+    builder = DummyPromptBuilder()
+    tools = ToolRegistry()
+    tts = DummyTTS()
+    sink = MemorySink()
+
+    published: list[tuple[str, bytes, int, bool]] = []
+
+    def pub_fn(topic: str, payload: bytes, qos: int, retain: bool) -> None:
+        published.append((topic, payload, qos, retain))
+
+    turn = TurnManager(
+        state_machine=sm,
+        wake=wake,
+        vad=vad,
+        stt=stt,
+        llm=llm,
+        prompt_builder=builder,
+        tools=tools,
+        tts=tts,
+        sink=sink,
+        publish_fn=pub_fn,
+    )
+
+    frame = np.zeros(160, dtype=np.int16)
+    source = MemorySource(pcm=b"\x00" * 320)
+
+    res = turn.process_audio_frame(frame, source=source)
+    assert res == "Hi there friend!"
+    assert sm.state == BrainState.IDLE
+    assert len(published) >= 1
+    assert published[0][0] == BRAIN_SAY
+    say = BrainSay.model_validate_json(published[0][1].decode("utf-8"))
+    assert say.emotion == Emotion.HAPPY
+    assert "Hi there friend!" in say.text
+    assert tts.spoken == ["Hi there friend!"]
+
+
+def test_echo_handling() -> None:
+    sm = BrainStateMachine(publish_fn=_noop_publish)
+    sm.transition(BrainState.LISTENING)
+    sm.transition(BrainState.THINKING)
+    sm.transition(BrainState.SPEAKING)
+    assert sm.state == BrainState.SPEAKING
+
+    wake = DummyWake(score=0.1)
+    vad = DummyVAD()
+    stt = DummySTT()
+    llm = DummyLLM(text="Test reply")
+    builder = DummyPromptBuilder()
+    tools = ToolRegistry()
+    tts = DummyTTS()
+    sink = MemorySink()
+
+    turn = TurnManager(
+        state_machine=sm,
+        wake=wake,
+        vad=vad,
+        stt=stt,
+        llm=llm,
+        prompt_builder=builder,
+        tools=tools,
+        tts=tts,
+        sink=sink,
+    )
+
+    loud_frame = np.full(160, 6000, dtype=np.int16)
+    assert vad.is_speech(loud_frame) is True
+    assert wake.score_frame(loud_frame) == 0.1
+    assert wake.score_frame(loud_frame) < 0.5
+
+    for _ in range(50):
+        res = turn.process_audio_frame(loud_frame)
+        assert res is None
+        assert sm.state == BrainState.SPEAKING
+
+
+def test_barge_in_stops_streaming_and_transitions_to_listening() -> None:
+    sm = BrainStateMachine(publish_fn=_noop_publish)
+    wake = DummyWake(score=0.95)
+    vad = DummyVAD()
+    stt = DummySTT()
+    chunks = [f"Word{i}. " for i in range(50)]
+    llm = SlowLLMClient(chunks=chunks, chunk_delay=0.02)
+    builder = DummyPromptBuilder()
+    tools = ToolRegistry()
+    tts = DummyTTS(chunk_delay=0.02)
+    sink = MemorySink()
+
+    turn = TurnManager(
+        state_machine=sm,
+        wake=wake,
+        vad=vad,
+        stt=stt,
+        llm=llm,
+        prompt_builder=builder,
+        tools=tools,
+        tts=tts,
+        sink=sink,
+    )
+
+    t = threading.Thread(target=turn.run_text_turn, args=("Tell me a long story",))
+    turn._active_thread = t
+    t.start()
+
+    deadline = time.perf_counter() + 1.0
+    while sm.state == BrainState.IDLE and time.perf_counter() < deadline:
+        time.sleep(0.01)
+
+    assert sm.state in (BrainState.SPEAKING, BrainState.THINKING)
+
+    if sm.state == BrainState.THINKING:
+        t_wait = time.perf_counter() + 0.5
+        while sm.state == BrainState.THINKING and time.perf_counter() < t_wait:
+            time.sleep(0.01)
+
+    assert sm.state == BrainState.SPEAKING
+
+    wake_frame = np.zeros(160, dtype=np.int16)
+    assert wake.score_frame(wake_frame) == 0.95
+
+    t_barge0 = time.perf_counter()
+    res = turn.process_audio_frame(wake_frame)
+    barge_dur_ms = (time.perf_counter() - t_barge0) * 1000.0
+
+    assert res == "barge_in"
+    assert barge_dur_ms < 300.0
+    assert turn.cancel_event.is_set() is True
+    assert sink.stopped is True
+    assert turn._active_thread is None
+    assert not t.is_alive()
+    assert sm.state == BrainState.LISTENING
+
+
+def test_listen_and_respond_empty_stt() -> None:
+    sm = BrainStateMachine(publish_fn=_noop_publish)
+    wake = DummyWake()
+    vad = DummyVAD(utterance=b"\x00" * 320)
+    stt = DummySTT(text="")
+    llm = DummyLLM(text="")
+    builder = DummyPromptBuilder()
+    tools = ToolRegistry()
+    tts = DummyTTS()
+    sink = MemorySink()
+
+    turn = TurnManager(
+        state_machine=sm,
+        wake=wake,
+        vad=vad,
+        stt=stt,
+        llm=llm,
+        prompt_builder=builder,
+        tools=tools,
+        tts=tts,
+        sink=sink,
+    )
+
+    source = MemorySource(pcm=b"\x00" * 320)
+    res = turn.listen_and_respond(source)
+    assert res is None
+    assert sm.state == BrainState.IDLE
+
+
+def test_turn_metrics_callback() -> None:
+    sm = BrainStateMachine(publish_fn=_noop_publish)
+    wake = DummyWake()
+    vad = DummyVAD()
+    stt = DummySTT()
+    llm = DummyLLM(text="Done!")
+    builder = DummyPromptBuilder()
+    tools = ToolRegistry()
+    tts = DummyTTS()
+    sink = MemorySink()
+
+    metrics_captured: list[dict[str, float]] = []
+
+    def on_metrics(m: dict[str, float]) -> None:
+        metrics_captured.append(m)
+
+    turn = TurnManager(
+        state_machine=sm,
+        wake=wake,
+        vad=vad,
+        stt=stt,
+        llm=llm,
+        prompt_builder=builder,
+        tools=tools,
+        tts=tts,
+        sink=sink,
+        on_turn_metrics=on_metrics,
+    )
+
+    reply = turn.run_text_turn("Hi", vad_end_ts=time.perf_counter(), stt_ms=15.0)
+    assert reply == "Done!"
+    assert len(metrics_captured) == 1
+    assert "llm_ttft_ms" in metrics_captured[0]
+    assert "tts_first_chunk_ms" in metrics_captured[0]
+    assert "e2e_voice_ms" in metrics_captured[0]
