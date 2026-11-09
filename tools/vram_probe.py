@@ -48,9 +48,7 @@ def query_compute_apps(target_pid: Optional[int] = None) -> tuple[str, str, int]
         matched = [a for a in apps if a[0] == str(target_pid)]
         return matched[0] if matched else ("", "", 0)
     py_apps = [a for a in apps if "python" in a[1].lower()]
-    return (
-        max(py_apps, key=lambda a: a[2]) if py_apps else max(apps, key=lambda a: a[2])
-    )
+    return max(py_apps, key=lambda a: a[2]) if py_apps else max(apps, key=lambda a: a[2])
 
 
 def run_probe(
@@ -102,9 +100,7 @@ def run_probe(
                     max(peak_cv, cv_used),
                     min(min_free, free),
                 )
-                if (proc and proc.poll() is not None) or (
-                    duration > 0.0 and (clock() - start) >= duration
-                ):
+                if (proc and proc.poll() is not None) or (duration > 0.0 and (clock() - start) >= duration):
                     break
                 time.sleep(interval)
         except KeyboardInterrupt:
@@ -132,9 +128,7 @@ def main() -> None:
         default="docs/acceptance/T0.5/vram_baseline.csv",
         help="Output CSV path",
     )
-    p.add_argument(
-        "--interval", type=float, default=1.0, help="Polling interval in seconds"
-    )
+    p.add_argument("--interval", type=float, default=1.0, help="Polling interval in seconds")
     p.add_argument("--duration", type=float, default=0.0, help="Duration in seconds")
     p.add_argument("--cmd", default=None, help="Command to profile")
     args = p.parse_args()
