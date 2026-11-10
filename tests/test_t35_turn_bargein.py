@@ -173,7 +173,9 @@ def test_full_voice_turn() -> None:
     source = MemorySource(pcm=b"\x00" * 320)
 
     res = turn.process_audio_frame(frame, source=source)
-    assert res == "Hi there friend!"
+    assert res == "listening"
+    assert turn._active_thread is not None
+    turn._active_thread.join(timeout=2.0)
     assert sm.state == BrainState.IDLE
     assert len(published) >= 1
     assert published[0][0] == BRAIN_SAY
@@ -225,8 +227,8 @@ def test_echo_handling() -> None:
 def test_barge_in_stops_streaming_and_transitions_to_listening() -> None:
     sm = BrainStateMachine(publish_fn=_noop_publish)
     wake = DummyWake(score=0.95)
-    vad = DummyVAD()
-    stt = DummySTT()
+    vad = DummyVAD(utterance=b"\x00" * 320)
+    stt = DummySTT(text="Tell me a long story")
     chunks = [f"Word{i}. " for i in range(50)]
     llm = SlowLLMClient(chunks=chunks, chunk_delay=0.02)
     builder = DummyPromptBuilder()
@@ -246,31 +248,30 @@ def test_barge_in_stops_streaming_and_transitions_to_listening() -> None:
         sink=sink,
     )
 
-    t = threading.Thread(target=turn.run_text_turn, args=("Tell me a long story",))
-    turn._active_thread = t
-    t.start()
+    frame = np.zeros(160, dtype=np.int16)
+    source = MemorySource(pcm=b"\x00" * 320)
 
-    deadline = time.perf_counter() + 1.0
-    while sm.state == BrainState.IDLE and time.perf_counter() < deadline:
-        time.sleep(0.01)
+    # First frame in IDLE triggers wake word and starts the voice turn off the audio thread
+    res0 = turn.process_audio_frame(frame, source=source)
+    assert res0 == "listening"
+    t = turn._active_thread
+    assert t is not None
+    assert t.is_alive()
 
-    assert sm.state in (BrainState.SPEAKING, BrainState.THINKING)
+    # Audio loop continues feeding frames until barge_in occurs during SPEAKING
+    barge_res = None
+    barge_dur_ms = 0.0
+    deadline = time.perf_counter() + 2.0
+    while time.perf_counter() < deadline:
+        t0 = time.perf_counter()
+        res = turn.process_audio_frame(frame, source=source)
+        if res == "barge_in":
+            barge_dur_ms = (time.perf_counter() - t0) * 1000.0
+            barge_res = res
+            break
+        time.sleep(0.005)
 
-    if sm.state == BrainState.THINKING:
-        t_wait = time.perf_counter() + 0.5
-        while sm.state == BrainState.THINKING and time.perf_counter() < t_wait:
-            time.sleep(0.01)
-
-    assert sm.state == BrainState.SPEAKING
-
-    wake_frame = np.zeros(160, dtype=np.int16)
-    assert wake.score_frame(wake_frame) == 0.95
-
-    t_barge0 = time.perf_counter()
-    res = turn.process_audio_frame(wake_frame)
-    barge_dur_ms = (time.perf_counter() - t_barge0) * 1000.0
-
-    assert res == "barge_in"
+    assert barge_res == "barge_in"
     assert barge_dur_ms < 300.0
     assert turn.cancel_event.is_set() is True
     assert sink.stopped is True
@@ -308,7 +309,63 @@ def test_listen_and_respond_empty_stt() -> None:
     assert sm.state == BrainState.IDLE
 
 
-def test_turn_metrics_callback() -> None:
+def test_barge_in_during_proactive_turn() -> None:
+    """Test that barge_in works during a proactive text turn (no audio source)."""
+    sm = BrainStateMachine(publish_fn=_noop_publish)
+    wake = DummyWake(score=0.95)
+    vad = DummyVAD(utterance=b"\x00" * 320)
+    stt = DummySTT(text="Interrupted!")
+    chunks = [f"Proactive word {i}. " for i in range(50)]
+    llm = SlowLLMClient(chunks=chunks, chunk_delay=0.02)
+    builder = DummyPromptBuilder()
+    tools = ToolRegistry()
+    tts = DummyTTS(chunk_delay=0.02)
+    sink = MemorySink()
+
+    turn = TurnManager(
+        state_machine=sm,
+        wake=wake,
+        vad=vad,
+        stt=stt,
+        llm=llm,
+        prompt_builder=builder,
+        tools=tools,
+        tts=tts,
+        sink=sink,
+    )
+
+    # Start proactive turn from IDLE (simulating _on_proactive_greet)
+    assert sm.state == BrainState.IDLE
+    turn.start_text_turn("Hello there! This is a long proactive greeting that should be interruptible.")
+    
+    t = turn._active_thread
+    assert t is not None
+    assert t.is_alive()
+
+    # Wait for turn to reach SPEAKING state
+    deadline = time.perf_counter() + 2.0
+    while time.perf_counter() < deadline and sm.state != BrainState.SPEAKING:
+        time.sleep(0.01)
+    
+    assert sm.state == BrainState.SPEAKING, f"Expected SPEAKING, got {sm.state}"
+
+    # Now simulate wake word during SPEAKING - should barge in
+    frame = np.zeros(160, dtype=np.int16)
+    barge_res = None
+    deadline = time.perf_counter() + 2.0
+    while time.perf_counter() < deadline:
+        res = turn.process_audio_frame(frame)
+        if res == "barge_in":
+            barge_res = res
+            break
+        time.sleep(0.005)
+
+    assert barge_res == "barge_in", "Barge-in should have triggered during proactive turn"
+    assert turn.cancel_event.is_set() is True
+    assert sink.stopped is True
+    assert turn._active_thread is None
+    assert not t.is_alive()
+    assert sm.state == BrainState.LISTENING
     sm = BrainStateMachine(publish_fn=_noop_publish)
     wake = DummyWake()
     vad = DummyVAD()

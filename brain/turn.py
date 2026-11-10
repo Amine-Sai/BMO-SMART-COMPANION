@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 import time
 import uuid
@@ -19,6 +20,8 @@ from brain.prompt import PromptBuilder
 from brain.state import BrainState, BrainStateMachine
 from brain.stream import SentenceSplitter
 from brain.tools.registry import ToolRegistry
+
+logger = logging.getLogger(__name__)
 
 
 class TurnManager:
@@ -65,7 +68,19 @@ class TurnManager:
             if self._wake.process_frame(frame):
                 self._state_machine.transition(BrainState.LISTENING)
                 if source is not None:
-                    return self.listen_and_respond(source)
+                    if (
+                        self._active_thread is not None
+                        and self._active_thread.is_alive()
+                        and self._active_thread is not threading.current_thread()
+                    ):
+                        self._active_thread.join(timeout=0.25)
+                    self.cancel_event.clear()
+                    self._active_thread = threading.Thread(
+                        target=self.listen_and_respond,
+                        args=(source,),
+                        daemon=True,
+                    )
+                    self._active_thread.start()
                 return "listening"
 
         return None
@@ -94,7 +109,14 @@ class TurnManager:
         if self._state_machine.state == BrainState.IDLE:
             self._state_machine.transition(BrainState.LISTENING)
 
-        pcm = self._vad.collect_utterance(source)
+        try:
+            pcm = self._vad.collect_utterance(source)
+        except Exception as exc:
+            logger.warning("VAD collect_utterance failed: %s", exc)
+            if self._state_machine.state != BrainState.IDLE:
+                self._state_machine.transition(BrainState.IDLE)
+            return None
+
         t_vad_end = self._clock()
         if pcm is None:
             if self._state_machine.state != BrainState.IDLE:
@@ -107,11 +129,34 @@ class TurnManager:
                 self._state_machine.transition(BrainState.IDLE)
             return None
 
+        print(f"\n>>> You said: {stt_res.text}", flush=True)
+
         return self.run_text_turn(
             stt_res.text,
             vad_end_ts=t_vad_end,
             stt_ms=stt_res.latency_ms,
         )
+
+    def start_text_turn(self, text: str) -> str | None:
+        """Start a text-only turn on the active thread (for proactive handlers).
+        
+        Clears cancel_event, joins existing _active_thread if alive, and starts
+        a new thread running run_text_turn. Returns immediately.
+        """
+        self.cancel_event.clear()
+        if (
+            self._active_thread is not None
+            and self._active_thread.is_alive()
+            and self._active_thread is not threading.current_thread()
+        ):
+            self._active_thread.join(timeout=0.25)
+        self._active_thread = threading.Thread(
+            target=self.run_text_turn,
+            args=(text,),
+            daemon=True,
+        )
+        self._active_thread.start()
+        return None
 
     def run_text_turn(
         self,
