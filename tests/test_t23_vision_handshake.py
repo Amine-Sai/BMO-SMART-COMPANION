@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import socket
 import threading
 import time
@@ -161,3 +162,45 @@ def test_mismatched_id_ignored():
     res = client_under_test.send_command("reload_gallery", timeout_s=1.0)
     assert res.ok is True
     assert res.detail == "success"
+
+
+def test_publish_raise_cleans_pending():
+    def broken_publish(_topic: str, _payload: bytes, _qos: int, _retain: bool) -> None:
+        raise RuntimeError("network failure during publish")
+
+    client = VisionClient(publish_fn=broken_publish)
+    with pytest.raises(RuntimeError, match="network failure during publish"):
+        client.send_command("reload_gallery", timeout_s=1.0)
+    assert len(client._pending) == 0
+
+
+def test_bad_payload_ignored(caplog: pytest.LogCaptureFixture):
+    client = VisionClient(publish_fn=lambda *args: None)
+    with caplog.at_level(logging.WARNING):
+        client.handle_cmd_result(b"not valid json")
+        client.handle_cmd_result(b'{"wrong": "field"}')
+        client.handle_cmd_result("invalid string json")
+        client.handle_mqtt_message(VISION_CMD_RESULT, b"corrupt payload")
+
+    assert len(client._pending) == 0
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 4
+    assert all("Failed to validate VisionCmdResult payload" in r.message for r in warnings)
+
+
+def test_late_result_after_timeout_ignored(caplog: pytest.LogCaptureFixture):
+    client = VisionClient(publish_fn=lambda *args: None)
+    res = client.send_command("reload_gallery", timeout_s=0.05)
+    assert res.ok is False
+    assert res.detail == "timeout"
+    assert len(client._pending) == 0
+
+    late_result = VisionCmdResult(id=res.id, ok=True, detail="late arrival")
+    with caplog.at_level(logging.DEBUG):
+        client.handle_cmd_result(late_result)
+
+    assert len(client._pending) == 0
+    debugs = [r for r in caplog.records if r.levelno == logging.DEBUG and "unknown or expired" in r.message]
+    assert len(debugs) == 1
+    assert res.id in debugs[0].message
+

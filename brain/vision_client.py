@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import logging
 import queue
 import threading
 import time
@@ -10,6 +11,9 @@ import uuid
 import orjson
 from bmo_contracts.models import VisionCmd, VisionCmdResult
 from bmo_contracts.topics import TOPICS, VISION_CMD, VISION_CMD_RESULT
+from pydantic import ValidationError
+
+logger = logging.getLogger(__name__)
 
 
 class VisionClient:
@@ -26,11 +30,21 @@ class VisionClient:
         self._lock = threading.Lock()
 
     def handle_cmd_result(self, payload: VisionCmdResult | bytes | str) -> None:
-        res = payload if isinstance(payload, VisionCmdResult) else VisionCmdResult.model_validate_json(payload)
+        if isinstance(payload, VisionCmdResult):
+            res = payload
+        else:
+            try:
+                res = VisionCmdResult.model_validate_json(payload)
+            except ValidationError as e:
+                logger.warning("Failed to validate VisionCmdResult payload: %s", e)
+                return
+
         with self._lock:
             q = self._pending.get(res.id)
         if q is not None:
             q.put(res)
+        else:
+            logger.debug("Received VisionCmdResult for unknown or expired command id: %s", res.id)
 
     def handle_mqtt_message(self, topic: str, payload: bytes | str) -> None:
         if topic == VISION_CMD_RESULT:
@@ -53,12 +67,12 @@ class VisionClient:
         with self._lock:
             self._pending[req.id] = q
 
-        meta = TOPICS[VISION_CMD]
-        payload = orjson.dumps(req.model_dump(mode="json"))
-        self._publish_fn(VISION_CMD, payload, meta.qos, meta.retain)
-
-        deadline = self._clock() + timeout
         try:
+            meta = TOPICS[VISION_CMD]
+            payload = orjson.dumps(req.model_dump(mode="json"))
+            self._publish_fn(VISION_CMD, payload, meta.qos, meta.retain)
+
+            deadline = self._clock() + timeout
             remaining = max(0.0, deadline - self._clock())
             return q.get(timeout=remaining)
         except queue.Empty:
