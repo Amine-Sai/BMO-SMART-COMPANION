@@ -13,14 +13,21 @@ class LLMSettings(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    backend: str = "ollama"  # "ollama" or "llamacpp"
     model: str = "llama3.2:3b"
-    host: str = "http://localhost:11434"
+    host: str = "http://localhost:11434"  # for ollama: base URL; for llamacpp: model path
     num_ctx: int = 4096
     keep_alive: str = "5m"
     timeout_s: float = 30.0
     temperature: float = 0.7
     history_turns: int = 6
     history_max_tokens: int = 900
+    # llamacpp optimization settings
+    n_gpu_layers: int = -1  # -1 = all layers on GPU (if available), 0 = CPU only
+    n_threads: int = 8
+    use_flash_attn: bool = True
+    use_mmap: bool = True
+    use_mlock: bool = False
 
 
 class SceneSettings(BaseModel):
