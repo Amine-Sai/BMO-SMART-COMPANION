@@ -22,13 +22,14 @@ class SpeechToText:
         min_rms: float = 150.0,
         max_no_speech_prob: float = 0.6,
         clock: Callable[[], float] = time.perf_counter,
+        model: object | None = None,
     ) -> None:
         self._settings = settings
         self._transcribe_fn = transcribe_fn
         self._min_rms = min_rms
         self._max_no_speech_prob = max_no_speech_prob
         self._clock = clock
-        self._model = None
+        self._model = model
 
     def transcribe(self, pcm: np.ndarray | bytes) -> STTResult | None:
         if isinstance(pcm, bytes):
@@ -68,7 +69,12 @@ class SpeechToText:
             )
 
         audio_f32 = arr.astype(np.float32) / 32768.0
-        segments, _ = self._model.transcribe(audio_f32, beam_size=1, language="en")
+        segments, _ = self._model.transcribe(
+            audio_f32,
+            beam_size=1,
+            language="en",
+            condition_on_previous_text=False,
+        )
         valid_texts: list[str] = []
         total_conf = 0.0
         count = 0

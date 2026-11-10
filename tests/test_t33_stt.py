@@ -128,3 +128,38 @@ def test_transcribe_bytes_input() -> None:
     assert res is not None
     assert res.text == "bytes speech"
     assert res.confidence == 0.9
+
+
+class FakeSegment:
+    def __init__(self, text: str, no_speech_prob: float = 0.0) -> None:
+        self.text = text
+        self.no_speech_prob = no_speech_prob
+
+
+class FakeWhisperModel:
+    def __init__(self, segments: list[FakeSegment] | None = None) -> None:
+        self.segments = segments if segments is not None else [FakeSegment("hello world", 0.05)]
+        self.last_audio: np.ndarray | None = None
+        self.last_kwargs: dict[str, object] = {}
+
+    def transcribe(self, audio: np.ndarray, **kwargs: object) -> tuple[list[FakeSegment], None]:
+        self.last_audio = audio
+        self.last_kwargs = kwargs
+        return self.segments, None
+
+
+def test_transcribe_passes_condition_on_previous_text_false() -> None:
+    settings = AudioSettings()
+    fake_model = FakeWhisperModel([FakeSegment("test transcription", no_speech_prob=0.1)])
+    stt = SpeechToText(settings=settings, model=fake_model, min_rms=150.0)
+
+    active_pcm = np.full(16000, 1000, dtype=np.int16)
+    result = stt.transcribe(active_pcm)
+
+    assert result is not None
+    assert result.text == "test transcription"
+    assert pytest.approx(result.confidence) == 0.9
+    assert fake_model.last_kwargs.get("condition_on_previous_text") is False
+    assert fake_model.last_kwargs.get("beam_size") == 1
+    assert fake_model.last_kwargs.get("language") == "en"
+
