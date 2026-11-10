@@ -323,13 +323,3 @@ class MQTTBridge:
             "data": data or {},
         }
         self.publish_json(self.resp_topic, payload)
-
-    def publish_context(self, context: dict[str, Any], request_id: str | None = None) -> None:
-        """Publish short-term memory visual context snapshot."""
-        payload = {
-            "type": "context",
-            "request_id": request_id,
-            "timestamp": self.clock(),
-            "context": context,
-        }
-        self.publish_json(self.ctx_topic, payload)

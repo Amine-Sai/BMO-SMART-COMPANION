@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable
+import logging
 import signal
 import sys
 import threading
@@ -11,6 +12,7 @@ import time
 from typing import Any
 
 from paho.mqtt.client import CallbackAPIVersion, Client, MQTTMessage
+from pydantic import ValidationError
 
 from bmo_contracts.models import (
     FaceData,
@@ -170,19 +172,11 @@ class BrainService:
 
     def _on_proactive_greet(self, greeting: str) -> None:
         if self.state_machine.state == BrainState.IDLE:
-            threading.Thread(
-                target=self.turn_manager.run_text_turn,
-                args=(greeting,),
-                daemon=True,
-            ).start()
+            self.turn_manager.start_text_turn(greeting)
 
     def _on_sign_turn(self, sign_text: str) -> None:
         if self.state_machine.state == BrainState.IDLE:
-            threading.Thread(
-                target=self.turn_manager.run_text_turn,
-                args=(sign_text,),
-                daemon=True,
-            ).start()
+            self.turn_manager.start_text_turn(sign_text)
 
     def _on_connect(
         self,
@@ -212,8 +206,10 @@ class BrainService:
     ) -> None:
         try:
             self.handle_message(msg.topic, msg.payload)
-        except Exception:
-            pass
+        except ValidationError as exc:
+            logging.warning("MQTT validation error on topic '%s': %s", msg.topic, exc)
+        except Exception as exc:
+            logging.exception("MQTT handler error on topic '%s': %s", msg.topic, exc)
 
     def handle_message(self, topic: str, payload: bytes) -> None:
         _ = sanitize_payload({"topic": topic, "len": len(payload)})
