@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import threading
 import time
 from typing import Any
 from bmo_contracts.models import Scene, VisionStatus
@@ -106,15 +107,18 @@ class SceneCache:
         self._scene: Scene | None = None
         self._updated_at: float = 0.0
         self._online: bool = False
+        self._lock = threading.RLock()
 
     def update_scene(self, scene: Scene | bytes | str) -> None:
         if isinstance(scene, Scene):
-            self._scene = scene
+            parsed = scene
         elif isinstance(scene, (bytes, str)):
-            self._scene = Scene.model_validate_json(scene)
+            parsed = Scene.model_validate_json(scene)
         else:
-            self._scene = Scene.model_validate(scene)
-        self._updated_at = self._clock()
+            parsed = Scene.model_validate(scene)
+        with self._lock:
+            self._scene = parsed
+            self._updated_at = self._clock()
 
     def update_status(self, status: VisionStatus | bytes | str) -> None:
         if isinstance(status, VisionStatus):
@@ -123,7 +127,8 @@ class SceneCache:
             parsed = VisionStatus.model_validate_json(status)
         else:
             parsed = VisionStatus.model_validate(status)
-        self._online = bool(parsed.online)
+        with self._lock:
+            self._online = bool(parsed.online)
 
     def handle_mqtt_message(self, topic: str, payload: bytes | str | None = None) -> None:
         if payload is None:
@@ -142,27 +147,30 @@ class SceneCache:
             self.update_status(payload)
 
     def is_online(self) -> bool:
-        return self._online
+        with self._lock:
+            return self._online
 
     def is_stale(self) -> bool:
-        if not self._online:
-            return True
-        if self._scene is None:
-            return True
-        if (self._clock() - self._updated_at) > self._settings.max_age_s:
-            return True
-        return False
+        with self._lock:
+            if not self._online:
+                return True
+            if self._scene is None:
+                return True
+            if (self._clock() - self._updated_at) > self._settings.max_age_s:
+                return True
+            return False
 
     def current(self) -> Scene | None:
-        if self.is_stale():
-            return None
-        return self._scene
+        with self._lock:
+            if self.is_stale():
+                return None
+            return self._scene
 
     def as_prompt_line(self) -> str:
-        if not self._online or self.is_stale() or self._scene is None:
-            return "Camera: offline/stale"
-
-        scene = self._scene
+        with self._lock:
+            if not self._online or self.is_stale() or self._scene is None:
+                return "Camera: offline/stale"
+            scene = self._scene
 
         raw_people = _get_field(scene, "people", "persons")
         people_list: list[str] = []

@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from enum import StrEnum
+import threading
 
 import orjson
 from bmo_contracts.models import BrainStatus
@@ -65,28 +66,39 @@ class BrainStateMachine:
         initial_state: BrainState = BrainState.IDLE,
     ) -> None:
         self._publish_fn = publish_fn
+        self._lock = threading.RLock()
         self._state = BrainState(initial_state)
 
     @property
     def state(self) -> BrainState:
-        return self._state
+        with self._lock:
+            return self._state
 
-    def publish_current(self) -> None:
-        status = BrainStatus(online=True, state=self._state.value)
+    def _build_status_payload(self, state: BrainState) -> tuple[bytes, int, bool]:
+        status = BrainStatus(online=True, state=state.value)
         payload = orjson.dumps(status.model_dump(mode="json"))
         meta = TOPICS[BRAIN_STATUS]
-        self._publish_fn(BRAIN_STATUS, payload, meta.qos, meta.retain)
+        return payload, meta.qos, meta.retain
+
+    def publish_current(self) -> None:
+        with self._lock:
+            payload, qos, retain = self._build_status_payload(self._state)
+        self._publish_fn(BRAIN_STATUS, payload, qos, retain)
 
     def transition(self, target: BrainState | str) -> BrainState:
         target_state = BrainState(target)
-        if target_state == self._state:
-            self.publish_current()
-            return self._state
-        if target_state not in VALID_TRANSITIONS[self._state]:
-            raise InvalidTransitionError(f"Invalid transition: {self._state} -> {target_state}")
-        self._state = target_state
-        self.publish_current()
-        return self._state
+        with self._lock:
+            if target_state == self._state:
+                current_state = self._state
+            elif target_state not in VALID_TRANSITIONS[self._state]:
+                raise InvalidTransitionError(f"Invalid transition: {self._state} -> {target_state}")
+            else:
+                self._state = target_state
+                current_state = self._state
+            payload, qos, retain = self._build_status_payload(current_state)
+
+        self._publish_fn(BRAIN_STATUS, payload, qos, retain)
+        return current_state
 
     @staticmethod
     def last_will_payload() -> bytes:
