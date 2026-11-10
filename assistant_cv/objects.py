@@ -171,7 +171,7 @@ class ObjectDetector:
         if frame is None or frame.size == 0:
             return []
 
-        conf_thresh = max(0.50, float(conf if conf is not None else self.conf))
+        conf_thresh = float(conf if conf is not None else self.conf)
 
         # In YOLO-World / custom models, find class ID for 'person' if persons_only is set
         classes_filter = None

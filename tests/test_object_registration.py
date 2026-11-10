@@ -1,7 +1,6 @@
 """Unit and integration tests for ObjectRegistry, AutoObjectEnrollSession, and dynamic object registration."""
 
 import json
-import os
 import pathlib
 import sys
 import tempfile
@@ -14,7 +13,6 @@ if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 from assistant_cv.enroll import AutoObjectEnrollSession
-from assistant_cv.objects import ObjectDetector
 from assistant_cv.registry import ObjectRegistry
 
 
@@ -24,13 +22,13 @@ class DummyDetector:
         self.registered_classes = []
         self.counter = 0
 
-    def embed_crop(self, crop: np.ndarray) -> np.ndarray:
+    def embed_crop(self, _crop: np.ndarray) -> np.ndarray:
         vec = np.zeros(512, dtype=np.float32)
         vec[self.counter % 512] = 1.0
         self.counter += 1
         return vec
 
-    def register_class(self, name: str, synonyms: list[str] | None = None):
+    def register_class(self, name: str, _synonyms: list[str] | None = None):
         self.registered_classes.append(name)
         if name not in self.class_names:
             self.class_names.append(name)
@@ -144,7 +142,7 @@ class TestAutoObjectEnrollSession(unittest.TestCase):
             for i in range(3):
                 # Create slightly different frame patches to ensure visual diversity
                 dummy_frame[150:280, 200:260] = (i + 1) * 40
-                active = session.step(dummy_frame, detections)
+                session.step(dummy_frame, detections)
                 time.sleep(0.015)
 
             self.assertTrue(session.completed)

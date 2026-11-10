@@ -459,7 +459,7 @@ def draw_status_bar(
         cv2.LINE_AA,
     )
 
-    # FPS + [DEVICE]
+    # FPS and device indicator
     fps_val = float(fps or 0.0)
     dev_str = str(device or "cuda").upper()
     info_text = f"FPS: {fps_val:4.1f}  [{dev_str}]"
