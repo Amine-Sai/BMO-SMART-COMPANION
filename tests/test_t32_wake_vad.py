@@ -84,30 +84,39 @@ def test_wake_word_detector_default_fallback() -> None:
 
 def test_voice_activity_detector_utterance_collection() -> None:
     settings = load_settings().audio
-    min_silence = max(1, int(settings.vad_min_silence_ms // settings.frame_ms))
-    assert min_silence == 20
+    chunk_ms = settings.vad_chunk_samples / settings.sample_rate * 1000
+    min_silence_chunks = max(1, int(settings.vad_min_silence_ms // chunk_ms))
+    assert min_silence_chunks == 12  # 400ms / 32ms = 12
 
     def speech_prob_fn(frame: np.ndarray) -> float:
         return 1.0 if np.max(np.abs(frame)) > 1000 else 0.0
 
     vad = VoiceActivityDetector(settings=settings, speech_prob_fn=speech_prob_fn)
-    assert vad.min_silence_frames == 20
+    assert vad.min_silence_chunks == min_silence_chunks
 
     silent_frame = np.zeros(FRAME_SAMPLES, dtype=np.int16)
     speech_frame = np.full(FRAME_SAMPLES, 5000, dtype=np.int16)
 
-    # 10 silent frames + 25 speech frames + 25 silent frames
+    # 10 silent frames (3200 samples = 6 chunks + 128 remainder) + 25 speech frames (8000 samples) + 25 silent frames
     frames = [silent_frame] * 10 + [speech_frame] * 25 + [silent_frame] * 25
     audio_data = np.concatenate(frames)
     source = MemorySource(audio_data)
 
     utterance = vad.collect_utterance(source)
     assert utterance is not None
-    # 45 frames: 25 speech + 20 trailing silence frames
-    expected_samples = 45 * FRAME_SAMPLES
+
+    # Output includes pre-roll + speech chunks + trailing silence chunks
+    # 10 silent frames = 3200 samples = 6 chunks + 128 rem -> pre-roll has 6 chunks
+    # 25 speech frames = 8000 samples + 128 rem = 8128 = 15 full chunks + 448 rem
+    # But boundary creates 1 mixed chunk at speech start + 1 mixed chunk at speech end
+    # Total speech chunks: 16 (including mixed boundary chunks)
+    # Trailing silence: stops after 12 silence chunks
+    # Total: pre-roll (6) + speech (16) + 12 silence = 34 chunks * 512 = 17408 samples
+    expected_chunks = 6 + 16 + min_silence_chunks  # pre-roll + speech + trailing silence
+    expected_samples = expected_chunks * settings.vad_chunk_samples
     assert len(utterance) == expected_samples
 
-    # Verify early stop: 5 silent frames remain in source
+    # Verify early stop: some silent frames remain in source
     remaining_frame = source.read_frame()
     assert remaining_frame is not None
     assert np.array_equal(remaining_frame, silent_frame)
@@ -132,3 +141,68 @@ def test_voice_activity_detector_default_speech_probability() -> None:
     prob = vad.speech_probability(frame)
     assert 0.0 <= prob <= 1.0
     assert not vad.is_speech(frame)
+
+
+def test_voice_activity_detector_rechunks_320_to_512() -> None:
+    """Verify VAD internally re-chunks 320-sample frames to 512 for Silero."""
+    settings = load_settings().audio
+    assert settings.vad_chunk_samples == 512
+
+    received_frames: list[np.ndarray] = []
+
+    def capture_speech_prob_fn(frame: np.ndarray) -> float:
+        received_frames.append(frame.copy())
+        return 1.0 if np.max(np.abs(frame)) > 1000 else 0.0
+
+    vad = VoiceActivityDetector(settings=settings, speech_prob_fn=capture_speech_prob_fn)
+    speech_frame = np.full(FRAME_SAMPLES, 5000, dtype=np.int16)
+    silent_frame = np.zeros(FRAME_SAMPLES, dtype=np.int16)
+
+    # Feed 5 speech frames (5 * 320 = 1600 samples)
+    # Should produce 3 full 512-sample chunks + remainder
+    frames = [speech_frame] * 5
+    audio_data = np.concatenate(frames)
+    source = MemorySource(audio_data)
+
+    vad.collect_utterance(source)
+
+    # All frames passed to speech_prob_fn should be 512 samples
+    assert all(len(f) == settings.vad_chunk_samples for f in received_frames)
+    # 5 * 320 = 1600 samples -> 3 full 512 chunks (1536) + 64 remainder
+    # But we only process full chunks, so 3 frames of 512
+    assert len(received_frames) == 3
+
+
+def test_voice_activity_detector_preroll_prepended() -> None:
+    """Verify ~250ms pre-roll is prepended to collected utterances."""
+    settings = load_settings().audio
+    assert settings.vad_preroll_ms == 250
+
+    # Pre-roll frames at 512 samples: 250ms / (512/16000*1000) ≈ 7.8 frames -> 8 frames
+    preroll_frames_count = max(1, int(settings.vad_preroll_ms * settings.sample_rate / 1000 / settings.vad_chunk_samples))
+    # Need enough silent frames to fill pre-roll: 8 * 512 / 320 = 12.8 -> 13 frames
+    min_silent_frames = (preroll_frames_count * settings.vad_chunk_samples + FRAME_SAMPLES - 1) // FRAME_SAMPLES
+
+    def speech_prob_fn(frame: np.ndarray) -> float:
+        return 1.0 if np.max(np.abs(frame)) > 1000 else 0.0
+
+    vad = VoiceActivityDetector(settings=settings, speech_prob_fn=speech_prob_fn)
+
+    silent_frame = np.zeros(FRAME_SAMPLES, dtype=np.int16)
+    speech_frame = np.full(FRAME_SAMPLES, 5000, dtype=np.int16)
+
+    # Enough silent frames to fill pre-roll + speech frames + trailing silence
+    frames = [silent_frame] * (min_silent_frames + 2) + [speech_frame] * 10 + [silent_frame] * 20
+    audio_data = np.concatenate(frames)
+    source = MemorySource(audio_data)
+
+    utterance = vad.collect_utterance(source)
+    assert utterance is not None
+
+    # Utterance should include pre-roll + speech + trailing silence
+    preroll_samples = preroll_frames_count * settings.vad_chunk_samples
+    assert len(utterance) >= preroll_samples
+
+    # First preroll_samples should be silence (from the silent frames before speech)
+    preroll_portion = utterance[:preroll_samples]
+    assert np.all(preroll_portion == 0)

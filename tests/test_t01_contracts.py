@@ -6,7 +6,7 @@ import re
 import unittest
 from unittest.mock import MagicMock
 
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from assistant_cv.memory import ShortTermMemory
 from assistant_cv.mqtt_bridge import MQTTBridge
@@ -15,14 +15,20 @@ from bmo_contracts.models import (
     BrainSay,
     BrainStatus,
     Emotion,
+    EnrollArgs,
     FaceIdentified,
+    ForgetArgs,
     HwCmd,
     HwEvent,
     HwStatus,
+    MoveServoArgs,
     ObjectSeen,
     PersonDetected,
     PersonLeft,
+    PersonName,
+    PlaySoundArgs,
     Scene,
+    SetExpressionArgs,
     SignRecognized,
     VisionCmd,
     VisionCmdResult,
@@ -30,7 +36,13 @@ from bmo_contracts.models import (
     parse_event_json,
     validate_event,
 )
-from bmo_contracts.topics import TOPICS, VISION_CONTEXT, VISION_EVENTS
+from bmo_contracts.topics import (
+    BROKER_HOST,
+    BROKER_PORT,
+    TOPICS,
+    VISION_CONTEXT,
+    VISION_EVENTS,
+)
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -275,6 +287,227 @@ class TestMQTTBridgeContractConformance(unittest.TestCase):
             self.assertIsInstance(spec.retain, bool)
             self.assertGreater(len(spec.pub_roles), 0)
             self.assertGreater(len(spec.sub_roles), 0)
+
+
+class TestT1SchemaEnhancements(unittest.TestCase):
+    """Test enhancements added in T1: versioning, typed args, PersonName, broker defaults."""
+
+    def test_broker_defaults(self):
+        from bmo_contracts.topics import BROKER_HOST as TOPICS_BROKER_HOST
+        from bmo_contracts.topics import BROKER_PORT as TOPICS_BROKER_PORT
+
+        self.assertEqual(BROKER_HOST, "127.0.0.1")
+        self.assertEqual(BROKER_PORT, 1883)
+        self.assertEqual(TOPICS_BROKER_HOST, "127.0.0.1")
+        self.assertEqual(TOPICS_BROKER_PORT, 1883)
+
+    def test_envelope_version_defaults_to_one(self):
+        vs = VisionStatus(online=True)
+        self.assertEqual(vs.v, 1)
+
+        bs = BrainStatus(online=True, state="idle")
+        self.assertEqual(bs.v, 1)
+
+        hs = HwStatus(online=True, ts=1.0, capabilities=["lcd"])
+        self.assertEqual(hs.v, 1)
+
+        he = HwEvent(ts=1.0, kind="mute_switch", value=False)
+        self.assertEqual(he.v, 1)
+
+        sc = Scene(ts=1.0, people=[], objects=[], recent=[])
+        self.assertEqual(sc.v, 1)
+
+        vc = VisionCmd(id="cmd-1", cmd="reload_gallery")
+        self.assertEqual(vc.v, 1)
+
+        vcr = VisionCmdResult(id="cmd-1", ok=True, detail="ok")
+        self.assertEqual(vcr.v, 1)
+
+        bsay = BrainSay(utt_id="utt-1", text="hi", emotion=Emotion.NEUTRAL)
+        self.assertEqual(bsay.v, 1)
+
+        hwcmd = HwCmd(id="hw-1", target="pi", action="set_expression", args={"emotion": "neutral"})
+        self.assertEqual(hwcmd.v, 1)
+
+    def test_invalid_envelope_version_rejected(self):
+        with self.assertRaises(ValidationError):
+            VisionStatus.model_validate_json('{"v": 2, "online": true}')
+
+        with self.assertRaises(ValidationError):
+            BrainStatus.model_validate_json('{"v": 2, "online": true, "state": "idle"}')
+
+        with self.assertRaises(ValidationError):
+            HwStatus.model_validate_json('{"v": 99, "online": true, "ts": 1.0, "capabilities": []}')
+
+        with self.assertRaises(ValidationError):
+            HwEvent.model_validate_json('{"v": 0, "ts": 1.0, "kind": "mute_switch", "value": false}')
+
+        with self.assertRaises(ValidationError):
+            Scene.model_validate_json('{"v": 2, "ts": 1.0, "people": [], "objects": [], "recent": []}')
+
+        with self.assertRaises(ValidationError):
+            VisionCmd.model_validate_json('{"v": 2, "id": "1", "cmd": "reload_gallery"}')
+
+        with self.assertRaises(ValidationError):
+            VisionCmdResult.model_validate_json('{"v": 2, "id": "1", "ok": true, "detail": "ok"}')
+
+        with self.assertRaises(ValidationError):
+            BrainSay.model_validate_json('{"v": 2, "utt_id": "1", "text": "hi", "emotion": "neutral"}')
+
+        with self.assertRaises(ValidationError):
+            HwCmd.model_validate_json(
+                '{"v": 2, "id": "1", "target": "pi", "action": "set_expression", "args": {"emotion": "happy"}}'
+            )
+
+    def test_vision_cmd_result_data(self):
+        # Default is None
+        res_default = VisionCmdResult(id="c1", ok=True, detail="ok")
+        self.assertIsNone(res_default.data)
+
+        # Accepts custom dict
+        payload = {"gallery_size": 5, "identities": ["Alice", "Bob"]}
+        res = VisionCmdResult(id="c1", ok=True, detail="ok", data=payload)
+        self.assertEqual(res.data, payload)
+
+        # Roundtrip JSON
+        dumped = res.model_dump_json()
+        loaded = VisionCmdResult.model_validate_json(dumped)
+        self.assertEqual(loaded.data, payload)
+
+        # Extra top-level fields still forbidden
+        with self.assertRaises(ValidationError):
+            VisionCmdResult.model_validate_json('{"id": "1", "ok": true, "detail": "ok", "extra_bogus": 123}')
+
+    def test_person_name_validation(self):
+        adapter = TypeAdapter(PersonName)
+
+        # Valid names
+        self.assertEqual(adapter.validate_python("Alice"), "Alice")
+        self.assertEqual(adapter.validate_python("Bob-12_3"), "Bob-12_3")
+        self.assertEqual(adapter.validate_python("Jane Doe"), "Jane Doe")
+        self.assertEqual(adapter.validate_python("A" * 64), "A" * 64)
+
+        # Invalid names
+        with self.assertRaises(ValidationError):
+            adapter.validate_python("../traversal")
+
+        with self.assertRaises(ValidationError):
+            adapter.validate_python("")
+
+        with self.assertRaises(ValidationError):
+            adapter.validate_python("A" * 65)
+
+        with self.assertRaises(ValidationError):
+            adapter.validate_python("User@Domain")
+
+        with self.assertRaises(ValidationError):
+            adapter.validate_python("/etc/passwd")
+
+    def test_vision_cmd_person_name_enforcement(self):
+        # Valid enroll & forget
+        cmd_enroll = VisionCmd(id="1", cmd="enroll", args={"name": "Alice", "shots": 5})
+        self.assertEqual(cmd_enroll.args["name"], "Alice")
+
+        cmd_forget = VisionCmd(id="2", cmd="forget", args={"name": "Bob"})
+        self.assertEqual(cmd_forget.args["name"], "Bob")
+
+        # Typed models also supported
+        enroll_typed = VisionCmd(id="1t", cmd="enroll", args=EnrollArgs(name="Charlie", shots=4))
+        self.assertEqual(enroll_typed.args["name"], "Charlie")
+
+        forget_typed = VisionCmd(id="2t", cmd="forget", args=ForgetArgs(name="David"))
+        self.assertEqual(forget_typed.args["name"], "David")
+
+        # Invalid names rejected in VisionCmd
+        with self.assertRaises(ValidationError):
+            VisionCmd(id="3", cmd="enroll", args={"name": "../traversal"})
+
+        with self.assertRaises(ValidationError):
+            VisionCmd(id="4", cmd="forget", args={"name": "../../bad"})
+
+        with self.assertRaises(ValidationError):
+            VisionCmd(id="5", cmd="enroll", args={"name": ""})
+
+    def test_hw_cmd_set_expression_args_validation(self):
+        # Valid emotion
+        cmd = HwCmd(id="1", target="pi", action="set_expression", args={"emotion": "happy"})
+        self.assertEqual(cmd.args["emotion"], Emotion.HAPPY)
+
+        # Accepts "expression" key and normalizes to emotion
+        cmd_expr = HwCmd(id="2", target="pi", action="set_expression", args={"expression": "happy"})
+        self.assertEqual(cmd_expr.args["emotion"], Emotion.HAPPY)
+
+        # Typed SetExpressionArgs
+        typed_args = SetExpressionArgs(emotion=Emotion.SAD)
+        cmd_typed = HwCmd(id="3", target="pi", action="set_expression", args=typed_args)
+        self.assertEqual(cmd_typed.args["emotion"], Emotion.SAD)
+        self.assertEqual(typed_args["emotion"], Emotion.SAD)
+        self.assertEqual(typed_args.get_expression(), "sad")
+
+        # Invalid emotion rejected
+        with self.assertRaises(ValidationError):
+            HwCmd(id="4", target="pi", action="set_expression", args={"emotion": "angry"})
+
+        # Extra fields forbidden
+        with self.assertRaises(ValidationError):
+            HwCmd(id="5", target="pi", action="set_expression", args={"emotion": "happy", "extra": True})
+
+    def test_hw_cmd_move_servo_args_validation(self):
+        # Valid servo
+        cmd = HwCmd(id="1", target="esp32", action="move_servo", args={"id": "pan", "angle": 45.0})
+        self.assertEqual(cmd.args["id"], "pan")
+        self.assertEqual(cmd.args["angle"], 45.0)
+
+        # Valid arms and tilt
+        for sid in ("pan", "tilt", "left_arm", "right_arm"):
+            cmd_arm = HwCmd(id="2", target="esp32", action="move_servo", args={"id": sid, "angle": 0})
+            self.assertEqual(cmd_arm.args["id"], sid)
+
+        # Typed MoveServoArgs
+        typed_args = MoveServoArgs(id="tilt", angle=15.0)
+        cmd_typed = HwCmd(id="3", target="esp32", action="move_servo", args=typed_args)
+        self.assertEqual(cmd_typed.args["id"], "tilt")
+        self.assertEqual(cmd_typed.args["angle"], 15.0)
+        self.assertEqual(typed_args["id"], "tilt")
+
+        # Invalid servo id rejected
+        with self.assertRaises(ValidationError):
+            HwCmd(id="4", target="esp32", action="move_servo", args={"id": "head", "angle": 0.0})
+
+        # Extra fields forbidden
+        with self.assertRaises(ValidationError):
+            HwCmd(id="5", target="esp32", action="move_servo", args={"id": "pan", "angle": 0.0, "speed": 100})
+
+    def test_hw_cmd_play_sound_args_validation(self):
+        # Valid name
+        cmd = HwCmd(id="1", target="pi", action="play_sound", args={"name": "chime"})
+        self.assertEqual(cmd.args["name"], "chime")
+
+        # Sound file name with dot (e.g. ping.wav)
+        cmd_wav = HwCmd(id="2", target="pi", action="play_sound", args={"name": "ping.wav"})
+        self.assertEqual(cmd_wav.args["name"], "ping.wav")
+
+        # Accepts "sound" key and normalizes
+        cmd_sound = HwCmd(id="3", target="pi", action="play_sound", args={"sound": "chime"})
+        self.assertEqual(cmd_sound.args["name"], "chime")
+
+        # Typed PlaySoundArgs
+        typed_args = PlaySoundArgs(name="confirm")
+        cmd_typed = HwCmd(id="4", target="pi", action="play_sound", args=typed_args)
+        self.assertEqual(cmd_typed.args["name"], "confirm")
+        self.assertEqual(typed_args["name"], "confirm")
+        self.assertEqual(typed_args.get_sound(), "confirm")
+
+        # Path traversal rejected
+        with self.assertRaises(ValidationError):
+            HwCmd(id="5", target="pi", action="play_sound", args={"name": "../traversal"})
+
+        with self.assertRaises(ValidationError):
+            HwCmd(id="6", target="pi", action="play_sound", args={"name": "dir/sound.wav"})
+
+        # Extra fields forbidden
+        with self.assertRaises(ValidationError):
+            HwCmd(id="7", target="pi", action="play_sound", args={"name": "chime", "volume": 10})
 
 
 if __name__ == "__main__":

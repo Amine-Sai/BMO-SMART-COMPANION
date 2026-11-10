@@ -139,3 +139,54 @@ def test_scene_cache_offline_status() -> None:
     assert cache.is_stale() is True
     assert cache.current() is None
     assert cache.as_prompt_line() == "Camera: offline/stale"
+
+
+def test_scene_cache_concurrency() -> None:
+    settings = SceneSettings(max_age_s=2.0)
+    cache = SceneCache(settings=settings)
+    num_threads = 10
+    iterations = 50
+    barrier = threading.Barrier(num_threads)
+    errors: list[Exception] = []
+
+    def worker(tid: int) -> None:
+        try:
+            barrier.wait()
+            for i in range(iterations):
+                if tid % 3 == 0:
+                    scene = Scene(
+                        ts=time.monotonic(),
+                        people=[ScenePerson(name=f"User_{tid}_{i}", pos="center", proximity="near", since_s=1.0)],
+                        objects=[f"obj_{i}"],
+                        last_sign=LastSign(text="TEST", age_s=0.5),
+                        recent=[f"event_{i}"],
+                    )
+                    cache.update_scene(scene)
+                elif tid % 3 == 1:
+                    online = (i % 2 == 0)
+                    cache.update_status(VisionStatus(online=online))
+                else:
+                    cache.handle_mqtt_message(
+                        VISION_CONTEXT,
+                        Scene(ts=time.monotonic(), people=[], objects=[], recent=[]).model_dump_json(),
+                    )
+
+                _ = cache.is_online()
+                _ = cache.is_stale()
+                curr = cache.current()
+                if curr is not None:
+                    assert isinstance(curr, Scene)
+                prompt = cache.as_prompt_line()
+                assert isinstance(prompt, str)
+                assert prompt.startswith("Camera: ")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(num_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5.0)
+
+    assert not any(t.is_alive() for t in threads), "Worker threads hung (possible deadlock)"
+    assert not errors, f"Errors encountered during concurrency: {errors}"

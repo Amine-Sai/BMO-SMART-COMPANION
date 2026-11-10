@@ -335,5 +335,155 @@ def test_ollama_backend_unload_and_prewarm_payloads() -> None:
 
 def test_fake_backend_unload_and_prewarm() -> None:
     backend = FakeLLMBackend()
+    assert backend.unload_calls == 0
+    assert backend.prewarm_calls == 0
+    assert backend.unloaded is False
+    assert backend.prewarmed is False
+
     backend.unload()
+    assert backend.unload_calls == 1
+    assert backend.unloaded is True
+    assert backend.prewarm_calls == 0
+    assert backend.prewarmed is False
+
     backend.prewarm()
+    assert backend.unload_calls == 1
+    assert backend.unloaded is True
+    assert backend.prewarm_calls == 1
+    assert backend.prewarmed is True
+
+    # Wrapper delegation assertions
+    client = LLMClient(settings=make_test_settings(), backend=backend)
+    client.unload()
+    assert backend.unload_calls == 2
+    client.prewarm()
+    assert backend.prewarm_calls == 2
+
+
+def test_ollama_backend_malformed_stream_lines_skipped_and_logged(caplog: pytest.LogCaptureFixture) -> None:
+    settings = make_test_settings()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/chat"
+
+        def generate_lines():
+            line1 = json.dumps({"message": {"role": "assistant", "content": "hello "}, "done": False})
+            bad_line = '{"message": {"role": "assistant", "content": incomplete json...'
+            line2 = json.dumps({"message": {"role": "assistant", "content": "world!"}, "done": True})
+            yield (line1 + "\n").encode("utf-8")
+            yield (bad_line + "\n").encode("utf-8")
+            yield b"\n"  # empty line should be safely ignored
+            yield (line2 + "\n").encode("utf-8")
+
+        return httpx.Response(200, content=generate_lines())
+
+    client = httpx.Client(transport=httpx.MockTransport(handler), base_url=settings.host)
+    backend = OllamaBackend(settings, client=client)
+
+    with caplog.at_level("WARNING"):
+        chunks = list(backend.chat([{"role": "user", "content": "hi"}], stream=True))
+
+    assert len(chunks) == 2
+    assert chunks[0].text == "hello "
+    assert chunks[0].done is False
+    assert chunks[1].text == "world!"
+    assert chunks[1].done is True
+
+    warning_records = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert any("Malformed JSON in LLM stream line" in r.message and "incomplete json" in r.message for r in warning_records)
+
+
+def test_ollama_backend_malformed_tool_args_surfaces_tool_error(caplog: pytest.LogCaptureFixture) -> None:
+    from brain.tools.registry import ToolRegistry, ToolSpec
+    from pydantic import BaseModel
+
+    class SayTextArgs(BaseModel):
+        phrase: str
+
+    settings = make_test_settings()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/chat"
+        resp_data = {
+            "model": "qwen2.5:3b",
+            "message": {
+                "role": "assistant",
+                "content": "calling function",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "say_text",
+                            "arguments": '{"phrase": unclosed_string...',
+                        }
+                    }
+                ],
+            },
+            "done": True,
+        }
+        return httpx.Response(200, json=resp_data)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler), base_url=settings.host)
+    backend = OllamaBackend(settings, client=client)
+
+    with caplog.at_level("WARNING"):
+        chunks = list(backend.chat([{"role": "user", "content": "say something"}], stream=False))
+
+    assert len(chunks) == 1
+    chunk = chunks[0]
+    assert chunk.text == "calling function"
+    assert chunk.done is True
+    assert chunk.tool_call is not None
+    assert chunk.tool_call.name == "say_text"
+    assert chunk.tool_call.error is not None
+    assert "Malformed tool arguments JSON" in chunk.tool_call.error
+    assert "unclosed_string" in chunk.tool_call.error
+    assert "error" in chunk.tool_call.arguments
+
+    # Verify warning log with raw excerpt
+    warning_records = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert any("Malformed tool arguments JSON" in r.message and "unclosed_string" in r.message for r in warning_records)
+
+    # Verify existing error path: dispatching to ToolRegistry yields ok=False error result (for the model)
+    registry = ToolRegistry()
+    registry.register(
+        ToolSpec(
+            name="say_text",
+            description="say phrase",
+            schema=SayTextArgs,
+            handler=lambda _a: {"ok": True},
+        )
+    )
+    dispatch_res = registry.dispatch(chunk.tool_call)
+    assert dispatch_res.get("ok") is False
+    assert "error" in dispatch_res
+
+
+def test_parse_chunk_non_dict_tool_args_logged(caplog: pytest.LogCaptureFixture) -> None:
+    from brain.llm import _parse_chunk
+
+    with caplog.at_level("WARNING"):
+        chunks = list(
+            _parse_chunk(
+                {
+                    "message": {
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "calc",
+                                    "arguments": "42",
+                                }
+                            }
+                        ],
+                    },
+                    "done": True,
+                }
+            )
+        )
+
+    assert len(chunks) == 1
+    assert chunks[0].tool_call is not None
+    assert chunks[0].tool_call.name == "calc"
+    assert chunks[0].tool_call.error is not None
+    assert "expected JSON object" in chunks[0].tool_call.error
+    assert any("Malformed tool arguments" in r.message for r in caplog.records if r.levelname == "WARNING")
