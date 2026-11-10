@@ -6,7 +6,7 @@ This guide explains how to set up, monitor, and execute every MQTT command and e
 
 ## 1. Architecture Overview
 
-BMO Computer Vision features a bidirectional, non-blocking MQTT JSON bridge running at sub-millisecond network dispatch (`TCP_NODELAY` + `orjson`).
+BMO Computer Vision features a bidirectional, non-blocking MQTT JSON bridge running at sub-millisecond network dispatch (`TCP_NODELAY` + `orjson`). Topic names and message payload contracts are defined in `bmo_contracts/topics.py` and `bmo_contracts/models.py`.
 
 ```mermaid
 flowchart TD
@@ -135,7 +135,7 @@ mosquitto_sub -h localhost -p 1883 -t "bmo/vision/#" -v
 
 ## 5. Executing Commands Step-by-Step
 
-All commands are published to topic `bmo/vision/cmd` and acknowledge on `bmo/vision/cmd_result`.
+All commands are published to topic `bmo/vision/cmd` and acknowledge on `bmo/vision/cmd_result` (see `VisionCmd` and `VisionCmdResult` in `bmo_contracts/models.py`).
 
 ### 5.1 System & Orchestration Commands
 

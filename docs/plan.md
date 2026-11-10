@@ -289,11 +289,11 @@ class HwCmd(Model):           id: str; target: Literal["pi", "esp32"]; action: L
 
 #### T2.3 Vision command handshake (migrates legacy topics)
 - **deps**: T2.1, T0.3 · **owner**: G
-- **files**: `brain/vision_client.py`, `bmo_contracts/topics.py`, `assistant_cv/config.py`, `assistant_cv/mqtt_bridge.py`, `assistant_cv/main.py`, `tools/mqtt_client.py`, `tests/test_mqtt_commands.py`, `tests/test_pipeline_upgrades.py`, `mqtt_protocols.json`, `MQTT_GUIDE.md`, `tests/test_t23_vision_handshake.py`
+- **files**: `brain/vision_client.py`, `bmo_contracts/topics.py`, `bmo_contracts/models.py`, `assistant_cv/config.py`, `assistant_cv/mqtt_bridge.py`, `assistant_cv/main.py`, `tools/mqtt_client.py`, `tests/test_mqtt_commands.py`, `tests/test_pipeline_upgrades.py`, `MQTT_GUIDE.md`, `tests/test_t23_vision_handshake.py`
 - **do**:
   1. `VisionClient.send_cmd(cmd, args, timeout)` publishes `VisionCmd` on `bmo/vision/cmd` and awaits correlated `VisionCmdResult` on `bmo/vision/cmd_result`.
   2. Update `assistant_cv/main.py` and `mqtt_bridge.py` to handle `enroll`, `forget`, `reload_gallery`, `set_modules` and emit `VisionCmdResult` only when the operation completes (e.g., when `AutoEnrollSession` finishes).
-  3. Delete legacy `bmo/vision/command` and `bmo/vision/response` topics and update all references in `tools/mqtt_client.py`, `tests/test_mqtt_commands.py`, `tests/test_pipeline_upgrades.py`, `mqtt_protocols.json`, and `MQTT_GUIDE.md`.
+  3. Delete legacy `bmo/vision/command` and `bmo/vision/response` topics and update all references in `tools/mqtt_client.py`, `tests/test_mqtt_commands.py`, `tests/test_pipeline_upgrades.py`, `bmo_contracts/topics.py`, `bmo_contracts/models.py`, and `MQTT_GUIDE.md`.
 - **accept**: success, failure, and timeout paths pass against `mock_cv`; no caller sees success before `ok == True`; `grep -rn "bmo/vision/command\|bmo/vision/response" .` returns empty.
 
 #### T2.4 Identity tools
@@ -474,7 +474,7 @@ class HwCmd(Model):           id: str; target: Literal["pi", "esp32"]; action: L
 | **D** | `T0.3` | `tools/mock_{cv,pi}.py`, `tests/test_contracts_roundtrip.py` |
 | **E** | `T1.1`, `T1.4` | `brain/{__init__,settings,llm,stream}.py`, `config/settings.d/llm.yaml` |
 | **F** | `T1.2`, `T1.3`, `T1.5`, `T1.6` | `brain/{scene,prompt}.py`, `config/settings.d/scene.yaml`, `evals/**`, `tools/benchmark_llm.py`, `docs/decisions/llm.md` |
-| **G** | `T2.1`–`T2.6` | `brain/tools/**`, `brain/vision_client.py`, `config/limits.yaml`, `tools/gen_limits_header.py`, `bmo_contracts/topics.py` (`T2.3` legacy removal), `assistant_cv/{config,mqtt_bridge,main}.py` (`T2.3` hooks), `tools/mqtt_client.py` (`T2.3`), `tests/test_{mqtt_commands,pipeline_upgrades}.py` (`T2.3`), `mqtt_protocols.json`, `MQTT_GUIDE.md` |
+| **G** | `T2.1`–`T2.6` | `brain/tools/**`, `brain/vision_client.py`, `config/limits.yaml`, `tools/gen_limits_header.py`, `bmo_contracts/{topics,models}.py` (`T2.3` legacy removal), `assistant_cv/{config,mqtt_bridge,main}.py` (`T2.3` hooks), `tools/mqtt_client.py` (`T2.3`), `tests/test_{mqtt_commands,pipeline_upgrades}.py` (`T2.3`), `MQTT_GUIDE.md` |
 | **H** | `T3.1`–`T3.4` | `brain/audio/**`, `config/settings.d/audio.yaml` |
 | **I** | `T3.5`, `T3.6` | `brain/{turn,telemetry}.py` |
 | **J** | `T4.1`–`T4.5` | `brain/{state,attribution,policy,lifecycle}.py`, `brain/inputs/**`, `config/settings.d/policy.yaml`, `assistant_cv/main.py` (`T4.5` hook) |

@@ -1,2 +1,3 @@
 onnxruntime; sys_platform == "never"
 tflite-runtime; sys_platform == "never"
+opencv-python; sys_platform == "never"
