@@ -19,8 +19,8 @@ class SpeechToText:
         self,
         settings: AudioSettings,
         transcribe_fn: Callable[[np.ndarray], tuple[str, float] | None] | None = None,
-        min_rms: float = 150.0,
-        max_no_speech_prob: float = 0.6,
+        min_rms: float = 300.0,  # Increased from 150 to reduce noise
+        max_no_speech_prob: float = 0.4,  # Stricter threshold
         clock: Callable[[], float] = time.perf_counter,
         model: object | None = None,
     ) -> None:
@@ -42,6 +42,11 @@ class SpeechToText:
 
         rms = float(np.sqrt(np.mean(arr.astype(np.float32) ** 2)))
         if rms < self._min_rms:
+            return None
+
+        # Minimum duration check (at least 500ms of audio)
+        duration_s = len(arr) / self._settings.sample_rate
+        if duration_s < 0.5:
             return None
 
         t0 = self._clock()
@@ -74,6 +79,8 @@ class SpeechToText:
             beam_size=1,
             language="en",
             condition_on_previous_text=False,
+            vad_filter=True,
+            vad_parameters=dict(min_silence_duration_ms=300, speech_pad_ms=100),
         )
         valid_texts: list[str] = []
         total_conf = 0.0
