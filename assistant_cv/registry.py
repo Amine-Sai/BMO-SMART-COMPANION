@@ -17,9 +17,33 @@ except ImportError:
 
 def _sanitize_id(name: str) -> str:
     """Convert name to filesystem and registry-safe identifier."""
-    clean = re.sub(r"[^\w\s-]", "", name.strip()).strip().lower()
+    clean = re.sub(r"[^\w\s-]", "", name.strip()).strip()
     clean = re.sub(r"[-\s]+", "_", clean)
     return clean or "user"
+
+
+def _safe_gallery_path(gallery_dir: pathlib.Path, name: str, suffix: str = ".npy") -> tuple[str, pathlib.Path]:
+    """Validate name against path traversal and return (sanitized_id, safe_path).
+
+    Raises:
+        ValueError: If name or resolved path attempts directory traversal outside gallery_dir.
+    """
+    clean_name = name.strip()
+    if not clean_name:
+        raise ValueError("Name cannot be empty.")
+
+    base_dir = gallery_dir.resolve()
+    raw_target = (gallery_dir / clean_name).resolve()
+    raw_file_target = (gallery_dir / f"{clean_name}{suffix}").resolve()
+    if "/" in clean_name or "\\" in clean_name or not raw_target.is_relative_to(base_dir) or not raw_file_target.is_relative_to(base_dir):
+        raise ValueError(f"Path traversal detected in name: {name!r}")
+
+    ident_id = _sanitize_id(clean_name)
+    safe_path = (gallery_dir / f"{ident_id}{suffix}").resolve()
+    if not safe_path.is_relative_to(base_dir):
+        raise ValueError(f"Path traversal detected in sanitized path: {safe_path}")
+
+    return ident_id, safe_path
 
 
 class IdentityRegistry:
@@ -51,7 +75,16 @@ class IdentityRegistry:
         # Synchronize with any existing *.npy files in gallery_dir
         for npy_path in sorted(self.gallery_dir.glob("*.npy")):
             file_id = _sanitize_id(npy_path.stem)
-            if file_id not in loaded_identities:
+            matched_key = None
+            if file_id in loaded_identities:
+                matched_key = file_id
+            else:
+                for k, v in loaded_identities.items():
+                    if k.lower() == file_id.lower() or str(v.get("name", "")).strip().lower() == npy_path.stem.strip().lower():
+                        matched_key = k
+                        break
+
+            if matched_key is None:
                 # Add discovered identity
                 loaded_identities[file_id] = {
                     "id": file_id,
@@ -62,7 +95,7 @@ class IdentityRegistry:
                     "file": npy_path.name,
                 }
             else:
-                loaded_identities[file_id]["file"] = npy_path.name
+                loaded_identities[matched_key]["file"] = npy_path.name
 
         self.identities = loaded_identities
         self.save()
@@ -93,6 +126,8 @@ class IdentityRegistry:
         for ident in self.identities.values():
             if str(ident.get("name", "")).strip().lower() == name_or_id.strip().lower():
                 return True
+            if str(ident.get("id", "")).strip().lower() == norm_key.lower():
+                return True
         return False
 
     def get_identity(self, name_or_id: str) -> dict[str, Any] | None:
@@ -102,6 +137,8 @@ class IdentityRegistry:
             return self.identities[norm_key]
         for ident in self.identities.values():
             if str(ident.get("name", "")).strip().lower() == name_or_id.strip().lower():
+                return ident
+            if str(ident.get("id", "")).strip().lower() == norm_key.lower():
                 return ident
         return None
 
@@ -117,7 +154,7 @@ class IdentityRegistry:
         if not clean_name:
             clean_name = f"Person_{len(self.identities) + 1}"
 
-        ident_id = _sanitize_id(clean_name)
+        ident_id, out_path = _safe_gallery_path(self.gallery_dir, clean_name)
         now = time.time()
 
         if ident_id in self.identities and not overwrite:
@@ -129,7 +166,6 @@ class IdentityRegistry:
         if norm_val > 1e-8:
             e = e / norm_val
 
-        out_path = self.gallery_dir / f"{clean_name}.npy"
         np.save(out_path, e)
 
         existing = self.identities.get(ident_id)
@@ -153,13 +189,24 @@ class IdentityRegistry:
 
     def delete_person(self, name_or_id: str) -> tuple[bool, str]:
         """Manually delete a registered person. Only called on explicit user command."""
-        ident = self.get_identity(name_or_id)
+        clean_name = name_or_id.strip()
+        if not clean_name:
+            return False, "Person identifier cannot be empty."
+
+        base_dir = self.gallery_dir.resolve()
+        raw_target = (self.gallery_dir / clean_name).resolve()
+        if "/" in clean_name or "\\" in clean_name or not raw_target.is_relative_to(base_dir):
+            raise ValueError(f"Path traversal detected in name: {name_or_id!r}")
+
+        ident = self.get_identity(clean_name)
         if ident is None:
-            return False, f"Person '{name_or_id}' not found in registry."
+            return False, f"Person '{clean_name}' not found in registry."
 
         ident_id = ident["id"]
         file_name = ident.get("file", f"{ident.get('name', ident_id)}.npy")
-        npy_path = self.gallery_dir / file_name
+        npy_path = (self.gallery_dir / file_name).resolve()
+        if not npy_path.is_relative_to(base_dir):
+            raise ValueError(f"Path traversal detected in file: {file_name}")
 
         if npy_path.exists():
             try:
@@ -173,7 +220,16 @@ class IdentityRegistry:
 
     def rename_person(self, old_name_or_id: str, new_name: str) -> tuple[bool, str]:
         """Rename an existing registered identity."""
-        ident = self.get_identity(old_name_or_id)
+        clean_old = old_name_or_id.strip()
+        if not clean_old:
+            return False, "Old name cannot be empty."
+
+        base_dir = self.gallery_dir.resolve()
+        raw_old = (self.gallery_dir / clean_old).resolve()
+        if "/" in clean_old or "\\" in clean_old or not raw_old.is_relative_to(base_dir):
+            raise ValueError(f"Path traversal detected in old name: {old_name_or_id!r}")
+
+        ident = self.get_identity(clean_old)
         if ident is None:
             return False, f"Person '{old_name_or_id}' not found."
 
@@ -181,11 +237,13 @@ class IdentityRegistry:
         if not new_clean:
             return False, "New name cannot be empty."
 
-        old_id = ident["id"]
-        new_id = _sanitize_id(new_clean)
+        new_id, new_file = _safe_gallery_path(self.gallery_dir, new_clean)
 
-        old_file = self.gallery_dir / ident.get("file", f"{ident['name']}.npy")
-        new_file = self.gallery_dir / f"{new_clean}.npy"
+        old_id = ident["id"]
+        old_file_name = ident.get("file", f"{ident['name']}.npy")
+        old_file = (self.gallery_dir / old_file_name).resolve()
+        if not old_file.is_relative_to(base_dir):
+            raise ValueError(f"Path traversal detected in existing file: {old_file_name}")
 
         if old_file.exists():
             try:
@@ -268,7 +326,16 @@ class ObjectRegistry:
         # Synchronize with any existing *.npy visual exemplars
         for npy_path in sorted(self.gallery_dir.glob("*.npy")):
             obj_id = _sanitize_id(npy_path.stem)
-            if obj_id not in loaded:
+            matched_key = None
+            if obj_id in loaded:
+                matched_key = obj_id
+            else:
+                for k, v in loaded.items():
+                    if k.lower() == obj_id.lower() or str(v.get("name", "")).strip().lower() == npy_path.stem.strip().lower():
+                        matched_key = k
+                        break
+
+            if matched_key is None:
                 loaded[obj_id] = {
                     "id": obj_id,
                     "name": npy_path.stem,
@@ -280,8 +347,8 @@ class ObjectRegistry:
                     "file": npy_path.name,
                 }
             else:
-                loaded[obj_id]["has_visual_exemplar"] = True
-                loaded[obj_id]["file"] = npy_path.name
+                loaded[matched_key]["has_visual_exemplar"] = True
+                loaded[matched_key]["file"] = npy_path.name
 
         self.objects = loaded
         self.reload_gallery()
@@ -382,6 +449,8 @@ class ObjectRegistry:
         for obj in self.objects.values():
             if str(obj.get("name", "")).strip().lower() == name_or_id.strip().lower():
                 return True
+            if str(obj.get("id", "")).strip().lower() == norm_key.lower():
+                return True
             for syn in obj.get("synonyms", []):
                 if str(syn).strip().lower() == name_or_id.strip().lower():
                     return True
@@ -394,6 +463,8 @@ class ObjectRegistry:
             return self.objects[norm_key]
         for obj in self.objects.values():
             if str(obj.get("name", "")).strip().lower() == name_or_id.strip().lower():
+                return obj
+            if str(obj.get("id", "")).strip().lower() == norm_key.lower():
                 return obj
             for syn in obj.get("synonyms", []):
                 if str(syn).strip().lower() == name_or_id.strip().lower():
@@ -412,7 +483,7 @@ class ObjectRegistry:
         if not clean_name:
             clean_name = f"Object_{len(self.objects) + 1}"
 
-        obj_id = _sanitize_id(clean_name)
+        obj_id, target_path = _safe_gallery_path(self.gallery_dir, clean_name)
         now = time.time()
 
         if obj_id in self.objects and not overwrite:
@@ -425,7 +496,7 @@ class ObjectRegistry:
             norm_val = float(np.linalg.norm(e))
             if norm_val > 1e-8:
                 e = e / norm_val
-            out_path = self.gallery_dir / f"{clean_name}.npy"
+            out_path = target_path
             np.save(out_path, e)
             has_vis = True
 
@@ -451,14 +522,25 @@ class ObjectRegistry:
 
     def delete_object(self, name_or_id: str) -> tuple[bool, str]:
         """Manually delete a registered object and its visual exemplars."""
-        obj = self.get_object(name_or_id)
+        clean_name = name_or_id.strip()
+        if not clean_name:
+            return False, "Object identifier cannot be empty."
+
+        base_dir = self.gallery_dir.resolve()
+        raw_target = (self.gallery_dir / clean_name).resolve()
+        if "/" in clean_name or "\\" in clean_name or not raw_target.is_relative_to(base_dir):
+            raise ValueError(f"Path traversal detected in name: {name_or_id!r}")
+
+        obj = self.get_object(clean_name)
         if obj is None:
             return False, f"Object '{name_or_id}' not found in registry."
 
         obj_id = obj["id"]
         file_name = obj.get("file")
         if file_name:
-            npy_path = self.gallery_dir / file_name
+            npy_path = (self.gallery_dir / file_name).resolve()
+            if not npy_path.is_relative_to(base_dir):
+                raise ValueError(f"Path traversal detected in file: {file_name}")
             if npy_path.exists():
                 try:
                     npy_path.unlink()
@@ -472,7 +554,16 @@ class ObjectRegistry:
 
     def rename_object(self, old_name_or_id: str, new_name: str) -> tuple[bool, str]:
         """Rename an existing registered object."""
-        obj = self.get_object(old_name_or_id)
+        clean_old = old_name_or_id.strip()
+        if not clean_old:
+            return False, "Old name cannot be empty."
+
+        base_dir = self.gallery_dir.resolve()
+        raw_old = (self.gallery_dir / clean_old).resolve()
+        if "/" in clean_old or "\\" in clean_old or not raw_old.is_relative_to(base_dir):
+            raise ValueError(f"Path traversal detected in old name: {old_name_or_id!r}")
+
+        obj = self.get_object(clean_old)
         if obj is None:
             return False, f"Object '{old_name_or_id}' not found in registry."
 
@@ -480,13 +571,14 @@ class ObjectRegistry:
         if not new_clean:
             return False, "New object name cannot be empty."
 
-        old_id = obj["id"]
-        new_id = _sanitize_id(new_clean)
+        new_id, new_file = _safe_gallery_path(self.gallery_dir, new_clean)
 
+        old_id = obj["id"]
         file_name = obj.get("file")
         if file_name:
-            old_file = self.gallery_dir / file_name
-            new_file = self.gallery_dir / f"{new_clean}.npy"
+            old_file = (self.gallery_dir / file_name).resolve()
+            if not old_file.is_relative_to(base_dir):
+                raise ValueError(f"Path traversal detected in file: {file_name}")
             if old_file.exists():
                 try:
                     old_file.rename(new_file)

@@ -21,38 +21,71 @@ To maintain CUDA GPU acceleration and avoid resolver deadlocks or package clobbe
 ```text
 onnxruntime; sys_platform == "never"
 tflite-runtime; sys_platform == "never"
+opencv-python; sys_platform == "never"
 ```
 
 ### 1. `onnxruntime; sys_platform == "never"`
-- Downstream packages such as `openwakeword`, `faster-whisper`, and standard ONNX utilities list `onnxruntime` as a direct or transitive dependency.
+- Downstream packages such as `openwakeword`, `faster-whisper`, `insightface`, and standard ONNX utilities list `onnxruntime` as a direct or transitive dependency.
 - If unconstrained, package managers (`uv`, `pip`) would install the CPU-only `onnxruntime` distribution, conflicting with or replacing `onnxruntime-gpu==1.31.1`.
 - Marking `onnxruntime; sys_platform == "never"` ensures that the solver treats `onnxruntime` as unavailable, allowing `onnxruntime-gpu` to provide the `onnxruntime` module namespace with full TensorRT / CUDA execution provider support.
 
 ### 2. `tflite-runtime; sys_platform == "never"`
 - Early releases of `openwakeword` depended on `tflite-runtime`. Without overriding `tflite-runtime`, resolvers attempt to downgrade `openwakeword` to `0.4.0` (2022 release), which lacks the modern ONNX backend (`inference_framework="onnx"`).
-- Marking `tflite-runtime` as excluded allows `openwakeword>=0.6.0` to resolve cleanly with its pure ONNX runtime path.
+- Marking `tflite-runtime` as excluded allows `openwakeword==0.6.0` to resolve cleanly with its pure ONNX runtime path.
+
+### 3. `opencv-python; sys_platform == "never"`
+- Packages such as `insightface` and `ultralytics` list `opencv-python` as a dependency.
+- The environment uses `opencv-contrib-python==5.0.0.93` to provide OpenCV bindings with extra modules.
+- Marking `opencv-python; sys_platform == "never"` prevents installing plain `opencv-python`, avoiding namespace clashes and satisfying repository hygiene constraints.
 
 ## Requirements Files Structure
 
-- **`requirements/overrides.txt`**: Platform marker overrides to prevent CPU `onnxruntime` and `tflite-runtime` installation.
-- **`requirements/brain.txt`**: Speech, audio, LLM client, and protocol dependencies:
-  - `faster-whisper`
-  - `openwakeword>=0.6.0`
-  - `silero-vad`
-  - `piper-tts`
-  - `sounddevice`
-  - `ollama`
-  - `httpx`
-  - `paho-mqtt`
-  - `orjson`
-  - `pydantic`
-  - `pyyaml`
-  - `pytest`
-- **`requirements/dev.txt`**: Developer hygiene and linting tools:
-  - `ruff`
-  - `vulture`
-- **`requirements/snapshot_pre_T0.4.txt`**: Baseline environment snapshot captured prior to installing speech/LLM packages.
-- **`requirements.lock.txt`**: Full locked freeze of `.venv` post-installation.
+- **`requirements/overrides.txt`**: Platform marker overrides to prevent CPU `onnxruntime`, `tflite-runtime`, and plain `opencv-python` installation.
+- **`requirements/base.in`**: Base runtime dependencies (PyTorch with CUDA support, OpenCV contrib, ONNX Runtime GPU, vision models, math utilities). Symlinked from `requirements/snapshot_pre_T0.4.txt` for backward compatibility.
+- **`requirements/brain.in`**: Speech, audio, LLM client, and protocol dependencies:
+  - `faster-whisper==1.2.1`
+  - `openwakeword==0.6.0`
+  - `silero-vad==6.2.3`
+  - `piper-tts==1.8.0`
+  - `sounddevice==0.5.6`
+  - `ollama==0.6.3`
+  - `httpx==0.28.1`
+  - `paho-mqtt==2.2.0`
+  - `orjson==3.13.0`
+  - `pydantic==2.14.3`
+  - `pyyaml==6.0.3`
+  - `pytest==9.2.0`
+  (Symlinked from `requirements/brain.txt` for backward compatibility).
+- **`requirements/dev.in`**: Developer hygiene and linting tools:
+  - `ruff==0.17.4`
+  - `vulture==2.16`
+  (Symlinked from `requirements/dev.txt` for backward compatibility).
+- **`requirements.lock.txt`**: Full reproducible hash-locked freeze of `.venv` generated via `uv pip compile --override requirements/overrides.txt requirements/*.in --generate-hashes`. Contains cryptographic sha256 hashes for all packages and no local filesystem URIs (`file:///`).
+
+## Installation & Compilation Procedures
+
+### Standard Environment Installation
+
+To install all dependencies reproducibly with hash verification:
+
+```bash
+# 1. Install hash-locked dependencies (using overrides to protect GPU packages)
+uv pip install --override requirements/overrides.txt --require-hashes -r requirements.lock.txt
+
+# Or equivalently using the environment variable:
+# UV_OVERRIDE=requirements/overrides.txt uv pip install --require-hashes -r requirements.lock.txt
+
+# 2. Install local contracts package (editable, without dependencies to maintain hash locking)
+pip install -e ./bmo_contracts --no-deps
+```
+
+### Re-compiling Requirements
+
+When modifying input dependencies in `requirements/*.in`:
+
+```bash
+uv pip compile --override requirements/overrides.txt requirements/*.in --generate-hashes -o requirements.lock.txt
+```
 
 ## Core Pinned Package Versions
 
@@ -92,7 +125,7 @@ tflite-runtime; sys_platform == "never"
    Must contain `onnxruntime-gpu` and `openwakeword` (0.6.0) and must not contain plain `onnxruntime` or `tflite-runtime`.
 
 3. **Core Version Parity**:
-   Versions for `torch`, `numpy`, `opencv-contrib-python`, and `onnxruntime-gpu` in `requirements.lock.txt` must match `requirements/snapshot_pre_T0.4.txt`.
+   Versions for `torch`, `numpy`, `opencv-contrib-python`, and `onnxruntime-gpu` in `requirements.lock.txt` must match `requirements/base.in`.
 
 4. **CV Test Suite Regression**:
    ```bash

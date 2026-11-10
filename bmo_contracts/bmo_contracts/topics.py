@@ -30,6 +30,9 @@ class TopicSpec:
     sub_roles: tuple[Role, ...]
 
 
+BROKER_HOST = "127.0.0.1"
+BROKER_PORT = 1883
+
 VISION_STATUS = "bmo/vision/status"
 VISION_EVENTS = "bmo/vision/events"
 VISION_CONTEXT = "bmo/vision/context"

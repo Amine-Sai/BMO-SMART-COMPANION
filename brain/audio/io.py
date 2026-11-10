@@ -9,10 +9,24 @@ from typing import Callable, Protocol, runtime_checkable
 import numpy as np
 import sounddevice as sd
 
-SAMPLE_RATE: int = 16000
-FRAME_MS: int = 20
+from brain.settings import AudioSettings
+
+_audio_defaults = AudioSettings()
+SAMPLE_RATE: int = _audio_defaults.sample_rate
+FRAME_MS: int = _audio_defaults.frame_ms
 FRAME_SAMPLES: int = int(SAMPLE_RATE * FRAME_MS / 1000)  # 320 samples
 FRAME_BYTES: int = FRAME_SAMPLES * 2  # 640 bytes (int16 mono)
+
+
+def to_int16(pcm: np.ndarray | bytes | bytearray | memoryview) -> np.ndarray:
+    """Convert PCM audio (bytes, int16 array, or float [-1.0, 1.0]) to 1D int16 array."""
+    if isinstance(pcm, (bytes, bytearray, memoryview)):
+        return np.frombuffer(pcm, dtype=np.int16).copy()
+    arr = np.asarray(pcm)
+    if np.issubdtype(arr.dtype, np.floating):
+        clipped = np.clip(arr, -1.0, 1.0)
+        return np.rint(clipped * 32767.0).astype(np.int16).reshape(-1)
+    return arr.astype(np.int16, copy=False).reshape(-1)
 
 
 @runtime_checkable
@@ -49,10 +63,7 @@ class MemorySource:
     """Yields 20 ms (320-sample) int16 frames from an in-memory buffer."""
 
     def __init__(self, pcm: np.ndarray | bytes) -> None:
-        if isinstance(pcm, bytes):
-            self._samples = np.frombuffer(pcm, dtype=np.int16).copy()
-        else:
-            self._samples = np.asarray(pcm, dtype=np.int16).reshape(-1).copy()
+        self._samples = to_int16(pcm).copy()
         self._cursor: int = 0
         self._closed: bool = False
 
@@ -83,10 +94,7 @@ class MemorySink:
     def write_samples(self, pcm: np.ndarray | bytes) -> None:
         if self._closed:
             return
-        if isinstance(pcm, bytes):
-            arr = np.frombuffer(pcm, dtype=np.int16)
-        else:
-            arr = np.asarray(pcm, dtype=np.int16).reshape(-1)
+        arr = to_int16(pcm)
         self._chunks.append(arr.copy())
         self.stopped = False
 
@@ -112,10 +120,7 @@ class _LoopbackShared:
         self._sink_closed = False
 
     def write(self, pcm: np.ndarray | bytes) -> None:
-        if isinstance(pcm, np.ndarray):
-            raw = pcm.astype(np.int16, copy=False).tobytes()
-        else:
-            raw = bytes(pcm)
+        raw = to_int16(pcm).tobytes()
         with self._cond:
             if self._sink_closed or self._closed:
                 return
@@ -250,10 +255,7 @@ class SoundDeviceSink:
         self._stream: sd.OutputStream | None = None
 
     def write_samples(self, pcm: np.ndarray | bytes) -> None:
-        if isinstance(pcm, bytes):
-            arr = np.frombuffer(pcm, dtype=np.int16)
-        else:
-            arr = np.asarray(pcm, dtype=np.int16).reshape(-1)
+        arr = to_int16(pcm)
         if len(arr) == 0:
             return
         if self._stream is None:

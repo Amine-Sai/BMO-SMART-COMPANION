@@ -6,6 +6,7 @@ from collections import deque
 import pathlib
 import time
 from typing import Any
+import warnings
 
 import cv2
 import numpy as np
@@ -50,6 +51,7 @@ class SignRecognizer:
         self.model: SignNet | None = None
         self.labels: list[str] = []
         self._loaded_mtime: float | None = None
+        self._warned_disabled: bool = False
         self._try_load_model()
 
     def _resolve_ckpt_path(self) -> pathlib.Path | None:
@@ -68,7 +70,7 @@ class SignRecognizer:
             mtime = ckpt_path.stat().st_mtime
             if self.model is not None and self._loaded_mtime == mtime:
                 return True
-            ckpt = torch.load(ckpt_path, map_location=DEVICE, weights_only=False)
+            ckpt = torch.load(ckpt_path, map_location=DEVICE, weights_only=True)
             labels = list(ckpt["labels"])
             net = SignNet(len(labels)).to(DEVICE)
             net.load_state_dict(ckpt["m"])
@@ -76,9 +78,12 @@ class SignRecognizer:
             self.model = net
             self.labels = labels
             self._loaded_mtime = mtime
+            self._warned_disabled = False
             return True
         except Exception as exc:
-            print(f"[WARN] Failed to load sign model from '{ckpt_path}': {exc}")
+            msg = f"[WARN] Failed to load sign model from '{ckpt_path}': {exc}"
+            print(msg)
+            warnings.warn(msg, UserWarning, stacklevel=2)
             self.model = None
             self.labels = []
             return False
@@ -116,7 +121,12 @@ class SignRecognizer:
             (active_sign, active_conf, buf_len, raw_lm)
         """
         if self.model is None:
-            self._try_load_model()
+            if not self._warned_disabled:
+                self._warned_disabled = True
+                msg = f"[WARN] Sign model not available ('{self.model_path}'); step() is disabled."
+                print(msg)
+                warnings.warn(msg, UserWarning, stacklevel=2)
+            return None, 0.0, 0, self.last_raw_lm
 
         raw_lm, x = self._extract_input(frame_bgr)
         self.last_raw_lm = raw_lm

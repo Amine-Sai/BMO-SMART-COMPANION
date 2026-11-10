@@ -4,10 +4,12 @@ After=network.target bmo-broker.service
 
 [Service]
 Type=simple
-WorkingDirectory=/home/judas/bmo-assistant
-ExecStart=/home/judas/bmo-assistant/.venv/bin/python -m brain.main
+WorkingDirectory=%h/bmo-assistant
+ExecStart=%h/bmo-assistant/.venv/bin/python -m brain.main
 Restart=on-failure
 RestartSec=3
+NoNewPrivileges=yes
+SupplementaryGroups=audio video
 
 [Install]
 WantedBy=multi-user.target

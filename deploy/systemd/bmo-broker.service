@@ -4,12 +4,13 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/judas/bmo-assistant
-# Alternate production command when system mosquitto is installed:
-# ExecStart=/usr/bin/mosquitto -c /home/judas/bmo-assistant/infra/mosquitto.conf
-ExecStart=/home/judas/bmo-assistant/.venv/bin/python -m tools.simple_broker --host 127.0.0.1 --port 1883
+WorkingDirectory=%h/bmo-assistant
+# Development / test fallback when mosquitto is not installed:
+# ExecStart=%h/bmo-assistant/.venv/bin/python -m tools.simple_broker --host 127.0.0.1 --port 1883
+ExecStart=/usr/sbin/mosquitto -c %h/bmo-assistant/infra/mosquitto.conf
 Restart=on-failure
 RestartSec=3
+NoNewPrivileges=yes
 
 [Install]
 WantedBy=multi-user.target

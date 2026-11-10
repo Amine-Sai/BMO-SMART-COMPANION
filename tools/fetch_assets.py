@@ -1,16 +1,163 @@
-"""Fetch and verify model assets for BMO Assistant (T0.6)."""
+"""Fetch and verify model assets for BMO Assistant (T0.6 / T13)."""
 
 from __future__ import annotations
 
 import argparse
 from collections.abc import Callable
+import hashlib
 from pathlib import Path
 import shutil
 import sys
+from typing import Any
+import urllib.error
 import urllib.request
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MODELS_DIR = REPO_ROOT / "models"
+CV_MODELS_DIR = REPO_ROOT / "assistant_cv" / "models"
+
+try:
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
+    from assistant_cv.config import MODELS_DIR as _CONFIG_CV_MODELS_DIR
+
+    CV_MODELS_DIR = _CONFIG_CV_MODELS_DIR
+except Exception:
+    pass
+
+
+def get_openwakeword_dir() -> Path:
+    """Resolve directory where openWakeWord looks for resource models."""
+    try:
+        import openwakeword
+
+        return Path(openwakeword.__file__).parent / "resources" / "models"
+    except Exception:
+        return (
+            REPO_ROOT
+            / ".venv"
+            / "lib"
+            / "python3.14"
+            / "site-packages"
+            / "openwakeword"
+            / "resources"
+            / "models"
+        )
+
+
+ASSETS: dict[str, dict[str, Any]] = {
+    "palm_detection": {
+        "name": "palm_detection",
+        "url": "https://huggingface.co/opencv/palm_detection_mediapipe/resolve/main/palm_detection_mediapipe_2023feb.onnx",
+        "path": CV_MODELS_DIR / "palm_detection.onnx",
+        "sha256": "78ff51c38496b7fc8b8ebdb6cc8c1abb02fa6c38427c6848254cdaba57fcce7c",
+    },
+    "handpose_estimation": {
+        "name": "handpose_estimation",
+        "url": "https://huggingface.co/opencv/handpose_estimation_mediapipe/resolve/main/handpose_estimation_mediapipe_2023feb.onnx",
+        "path": CV_MODELS_DIR / "handpose_estimation.onnx",
+        "sha256": "db0898ae717b76b075d9bf563af315b29562e11f8df5027a1ef07b02bef6d81c",
+    },
+    "piper_voice": {
+        "name": "piper_voice",
+        "url": "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/en_US-lessac-medium.onnx",
+        "path": DEFAULT_MODELS_DIR / "piper" / "en_US-lessac-medium.onnx",
+        "sha256": "5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f",
+    },
+    "piper_config": {
+        "name": "piper_config",
+        "url": "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json",
+        "path": DEFAULT_MODELS_DIR / "piper" / "en_US-lessac-medium.onnx.json",
+        "sha256": "efe19c417bed055f2d69908248c6ba650fa135bc868b0e6abb3da181dab690a0",
+    },
+    "hey_jarvis_v0.1": {
+        "name": "hey_jarvis_v0.1",
+        "url": "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/hey_jarvis_v0.1.onnx",
+        "path": get_openwakeword_dir() / "hey_jarvis_v0.1.onnx",
+        "sha256": "94a13cfe60075b132f6a472e7e462e8123ee70861bc3fb58434a73712ee0d2cb",
+    },
+    "melspectrogram": {
+        "name": "melspectrogram",
+        "url": "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/melspectrogram.onnx",
+        "path": get_openwakeword_dir() / "melspectrogram.onnx",
+        "sha256": "ba2b0e0f8b7b875369a2c89cb13360ff53bac436f2895cced9f479fa65eb176f",
+    },
+    "embedding_model": {
+        "name": "embedding_model",
+        "url": "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/embedding_model.onnx",
+        "path": get_openwakeword_dir() / "embedding_model.onnx",
+        "sha256": "70d164290c1d095d1d4ee149bc5e00543250a7316b59f31d056cff7bd3075c1f",
+    },
+}
+
+
+def find_asset(key_or_name: str) -> dict[str, Any] | None:
+    """Find an asset in ASSETS by key, name, or filename."""
+    if key_or_name in ASSETS:
+        return ASSETS[key_or_name]
+    for asset in ASSETS.values():
+        if asset["name"] == key_or_name or Path(asset["path"]).name == key_or_name:
+            return asset
+    return None
+
+
+def compute_sha256(path: Path | str) -> str:
+    """Compute SHA256 checksum of a file."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def download_and_verify(
+    url: str,
+    target_path: Path | str,
+    expected_sha256: str | None = None,
+    timeout: float = 30.0,
+    download_fn: Callable[[str, Path], None] | None = None,
+) -> Path:
+    """Download a file with timeout and verify its SHA256 checksum.
+
+    If verification fails or download errors out, deletes the target file and raises an exception.
+    """
+    dest = Path(target_path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if download_fn is not None:
+            download_fn(url, dest)
+        else:
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "Mozilla/5.0 (bmo-fetcher)"},
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp, open(dest, "wb") as f:
+                shutil.copyfileobj(resp, f)
+
+        if expected_sha256 is not None:
+            actual = compute_sha256(dest)
+            if actual.lower() != expected_sha256.lower():
+                dest.unlink(missing_ok=True)
+                raise ValueError(
+                    f"Checksum mismatch for {dest.name}: expected {expected_sha256}, got {actual}"
+                )
+    except Exception:
+        dest.unlink(missing_ok=True)
+        raise
+    return dest
+
+
+def verify_asset_file(target_path: Path | str, expected_sha256: str | None = None) -> bool:
+    """Check if a file exists and matches the expected SHA256 checksum."""
+    p = Path(target_path)
+    if not p.is_file():
+        return False
+    if expected_sha256 is not None:
+        try:
+            return compute_sha256(p).lower() == expected_sha256.lower()
+        except OSError:
+            return False
+    return True
 
 
 def check_ollama(client_check_fn: Callable[[], bool] | None = None) -> dict[str, object]:
@@ -43,18 +190,19 @@ def check_ollama(client_check_fn: Callable[[], bool] | None = None) -> dict[str,
 def fetch_openwakeword_models(
     model_names: list[str] | None = None,
     download_fn: Callable[[list[str]], None] | None = None,
+    file_download_fn: Callable[[str, Path], None] | None = None,
 ) -> dict[str, object]:
     """Verify or download stock openWakeWord models."""
     names = model_names or ["hey_jarvis_v0.1"]
-    import openwakeword
-    import openwakeword.utils
-
-    models_dir = Path(openwakeword.__file__).parent / "resources" / "models"
+    models_dir = get_openwakeword_dir()
+    models_dir.mkdir(parents=True, exist_ok=True)
 
     missing = []
     for name in names:
         target_name = f"{name}.onnx" if not name.endswith(".onnx") else name
-        if not (models_dir / target_name).is_file():
+        asset = find_asset(target_name) or find_asset(name)
+        sha = asset["sha256"] if asset else None
+        if not verify_asset_file(models_dir / target_name, sha):
             missing.append(name)
 
     if missing:
@@ -62,7 +210,33 @@ def fetch_openwakeword_models(
             download_fn(missing)
         else:
             try:
-                openwakeword.utils.download_models(missing)
+                # Ensure preprocessor models are present if using stock models
+                for prep in ("melspectrogram", "embedding_model"):
+                    prep_asset = ASSETS.get(prep)
+                    if prep_asset and not verify_asset_file(models_dir / f"{prep}.onnx", prep_asset["sha256"]):
+                        download_and_verify(
+                            url=prep_asset["url"],
+                            target_path=models_dir / f"{prep}.onnx",
+                            expected_sha256=prep_asset["sha256"],
+                            timeout=30.0,
+                            download_fn=file_download_fn,
+                        )
+
+                for name in missing:
+                    target_name = f"{name}.onnx" if not name.endswith(".onnx") else name
+                    asset = find_asset(target_name) or find_asset(name)
+                    if asset is not None:
+                        download_and_verify(
+                            url=asset["url"],
+                            target_path=models_dir / target_name,
+                            expected_sha256=asset["sha256"],
+                            timeout=30.0,
+                            download_fn=file_download_fn,
+                        )
+                    else:
+                        import openwakeword.utils
+
+                        openwakeword.utils.download_models([name])
             except Exception as exc:
                 return {
                     "engine": "openwakeword",
@@ -85,6 +259,7 @@ def fetch_piper_voice(
     voice_name: str = "en_US-lessac-medium",
     target_dir: Path | None = None,
     fetch_remote: bool = True,
+    download_fn: Callable[[str, Path], None] | None = None,
 ) -> dict[str, object]:
     """Verify or download Piper ONNX voice model and config."""
     out_dir = target_dir or (DEFAULT_MODELS_DIR / "piper")
@@ -93,17 +268,33 @@ def fetch_piper_voice(
     onnx_file = out_dir / f"{voice_name}.onnx"
     json_file = out_dir / f"{voice_name}.onnx.json"
 
+    onnx_asset = find_asset(f"{voice_name}.onnx") or (
+        ASSETS.get("piper_voice") if voice_name == "en_US-lessac-medium" else None
+    )
+    json_asset = find_asset(f"{voice_name}.onnx.json") or (
+        ASSETS.get("piper_config") if voice_name == "en_US-lessac-medium" else None
+    )
+
+    onnx_sha = onnx_asset["sha256"] if onnx_asset else None
+    json_sha = json_asset["sha256"] if json_asset else None
+
     base_url = "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium"
 
-    if fetch_remote and (not onnx_file.is_file() or not json_file.is_file()):
-        for file_path, remote_name in [
-            (onnx_file, f"{voice_name}.onnx"),
-            (json_file, f"{voice_name}.onnx.json"),
+    if fetch_remote:
+        for file_path, remote_name, expected_sha, asset_entry in [
+            (onnx_file, f"{voice_name}.onnx", onnx_sha, onnx_asset),
+            (json_file, f"{voice_name}.onnx.json", json_sha, json_asset),
         ]:
-            if not file_path.is_file():
-                url = f"{base_url}/{remote_name}"
+            if not verify_asset_file(file_path, expected_sha):
+                url = asset_entry["url"] if asset_entry else f"{base_url}/{remote_name}"
                 try:
-                    urllib.request.urlretrieve(url, str(file_path))
+                    download_and_verify(
+                        url=url,
+                        target_path=file_path,
+                        expected_sha256=expected_sha,
+                        timeout=30.0,
+                        download_fn=download_fn,
+                    )
                 except Exception as exc:
                     return {
                         "engine": "piper",
@@ -113,12 +304,59 @@ def fetch_piper_voice(
                         "error": f"Failed to download {remote_name}: {exc}",
                     }
 
+    ok = verify_asset_file(onnx_file, onnx_sha) and verify_asset_file(json_file, json_sha)
     return {
         "engine": "piper",
-        "ok": onnx_file.is_file() and json_file.is_file(),
+        "ok": ok,
         "voice": voice_name,
         "onnx_path": str(onnx_file) if onnx_file.is_file() else None,
         "json_path": str(json_file) if json_file.is_file() else None,
+    }
+
+
+def fetch_hand_models(
+    target_dir: Path | None = None,
+    fetch_remote: bool = True,
+    download_fn: Callable[[str, Path], None] | None = None,
+) -> dict[str, object]:
+    """Verify or download MediaPipe palm detection and handpose estimation ONNX models."""
+    out_dir = target_dir or CV_MODELS_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    palm_asset = ASSETS["palm_detection"]
+    handpose_asset = ASSETS["handpose_estimation"]
+
+    palm_path = out_dir / "palm_detection.onnx"
+    handpose_path = out_dir / "handpose_estimation.onnx"
+
+    if fetch_remote:
+        for asset, path in [(palm_asset, palm_path), (handpose_asset, handpose_path)]:
+            if not verify_asset_file(path, asset["sha256"]):
+                try:
+                    download_and_verify(
+                        url=asset["url"],
+                        target_path=path,
+                        expected_sha256=asset["sha256"],
+                        timeout=30.0,
+                        download_fn=download_fn,
+                    )
+                except Exception as exc:
+                    return {
+                        "engine": "hands",
+                        "ok": False,
+                        "dir": str(out_dir),
+                        "error": str(exc),
+                    }
+
+    palm_ok = verify_asset_file(palm_path, palm_asset["sha256"])
+    handpose_ok = verify_asset_file(handpose_path, handpose_asset["sha256"])
+
+    return {
+        "engine": "hands",
+        "ok": palm_ok and handpose_ok,
+        "dir": str(out_dir),
+        "palm_path": str(palm_path) if palm_ok else None,
+        "handpose_path": str(handpose_path) if handpose_ok else None,
     }
 
 
@@ -150,7 +388,7 @@ def fetch_faster_whisper(
 
 
 def fetch_all(check_only: bool = False) -> dict[str, object]:
-    """Run verification or download for all 4 engines."""
+    """Run verification or download for all engines."""
     results: dict[str, object] = {
         "ollama": check_ollama(),
         "openwakeword": fetch_openwakeword_models()
@@ -160,6 +398,7 @@ def fetch_all(check_only: bool = False) -> dict[str, object]:
         "faster_whisper": fetch_faster_whisper()
         if not check_only
         else {"engine": "faster_whisper", "check_only": True},
+        "hands": fetch_hand_models(fetch_remote=not check_only),
     }
     return results
 

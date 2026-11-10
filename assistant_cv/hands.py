@@ -9,35 +9,30 @@ Keeps identical public API:
 from __future__ import annotations
 
 import pathlib
-from urllib.request import Request, urlopen
 import numpy as np
 
 try:
     from .config import (
         HANDPOSE_MODEL_PATH,
-        HANDPOSE_MODEL_URL,
         PALM_MODEL_PATH,
-        PALM_MODEL_URL,
     )
     from .mp_handpose import MPHandPose
     from .mp_palmdet import MPPalmDet
 except ImportError:
     from config import (
         HANDPOSE_MODEL_PATH,
-        HANDPOSE_MODEL_URL,
         PALM_MODEL_PATH,
-        PALM_MODEL_URL,
     )
     from mp_handpose import MPHandPose
     from mp_palmdet import MPPalmDet
 
 
-def _ensure_model(path: pathlib.Path, url: str) -> pathlib.Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if not path.exists() or path.stat().st_size < 1_000_000:
-        req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urlopen(req) as resp, open(path, "wb") as f:
-            f.write(resp.read())
+def _require_model(path: pathlib.Path, model_name: str) -> pathlib.Path:
+    if not path.is_file() or path.stat().st_size == 0:
+        raise FileNotFoundError(
+            f"{model_name} model not found at {path}. "
+            "Runtime downloads are disabled. Run 'python tools/fetch_assets.py' to download pinned model assets."
+        )
     return path
 
 
@@ -49,14 +44,14 @@ def get_detectors() -> tuple[MPPalmDet, MPHandPose]:
     """Lazy singleton initializer for palm and hand pose detectors."""
     global _palm_detector, _handpose_detector
     if _palm_detector is None:
-        p_path = _ensure_model(PALM_MODEL_PATH, PALM_MODEL_URL)
+        p_path = _require_model(PALM_MODEL_PATH, "Palm detection")
         _palm_detector = MPPalmDet(
             modelPath=str(p_path),
             nmsThreshold=0.3,
             scoreThreshold=0.6,
         )
     if _handpose_detector is None:
-        h_path = _ensure_model(HANDPOSE_MODEL_PATH, HANDPOSE_MODEL_URL)
+        h_path = _require_model(HANDPOSE_MODEL_PATH, "Handpose estimation")
         _handpose_detector = MPHandPose(
             modelPath=str(h_path),
             confThreshold=0.6,

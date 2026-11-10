@@ -18,15 +18,13 @@ from brain.audio.io import (
     SAMPLE_RATE,
     AudioSink,
     AudioSource,
+    to_int16,
 )
 
 
 def pcm_to_wav_bytes(pcm: np.ndarray | bytes, sample_rate: int = SAMPLE_RATE) -> bytes:
     """Encode mono 16-bit PCM audio samples into WAV bytes."""
-    if isinstance(pcm, bytes):
-        raw = pcm
-    else:
-        raw = pcm.astype(np.int16, copy=False).tobytes()
+    raw = to_int16(pcm).tobytes()
 
     buf = io.BytesIO()
     with wave.open(buf, "wb") as wf:
@@ -42,7 +40,7 @@ def wav_bytes_to_pcm(wav_bytes: bytes) -> np.ndarray:
     buf = io.BytesIO(wav_bytes)
     with wave.open(buf, "rb") as wf:
         raw = wf.readframes(wf.getnframes())
-    return np.frombuffer(raw, dtype=np.int16).copy()
+    return to_int16(raw)
 
 
 class UDPAudioSender:
@@ -56,10 +54,7 @@ class UDPAudioSender:
 
     def send_frame(self, frame: np.ndarray | bytes) -> int:
         """Send a single frame padded or sliced to FRAME_SAMPLES."""
-        if isinstance(frame, bytes):
-            arr = np.frombuffer(frame, dtype=np.int16)
-        else:
-            arr = np.asarray(frame, dtype=np.int16).reshape(-1)
+        arr = to_int16(frame)
 
         if len(arr) < FRAME_SAMPLES:
             arr = np.pad(arr, (0, FRAME_SAMPLES - len(arr)))
@@ -73,10 +68,7 @@ class UDPAudioSender:
 
     def send_pcm(self, pcm: np.ndarray | bytes) -> int:
         """Split PCM samples into FRAME_SAMPLES frames and send all."""
-        if isinstance(pcm, bytes):
-            arr = np.frombuffer(pcm, dtype=np.int16)
-        else:
-            arr = np.asarray(pcm, dtype=np.int16).reshape(-1)
+        arr = to_int16(pcm)
 
         total = 0
         for i in range(0, len(arr), FRAME_SAMPLES):
@@ -104,6 +96,7 @@ class UDPAudioReceiver(AudioSource):
         self._running = True
         self.received_packets = 0
         self.dropped_packets = 0
+        self.late_packets = 0
         self._expected_seq: int | None = None
 
         self._thread = threading.Thread(target=self._receive_loop, daemon=True)
@@ -126,17 +119,22 @@ class UDPAudioReceiver(AudioSource):
                 self._expected_seq = (seq + 1) & 0xFFFFFFFF
             else:
                 gap = (seq - self._expected_seq) & 0xFFFFFFFF
-                if 0 < gap < 0x80000000:
+                if gap >= 0x80000000:
+                    self.late_packets += 1
+                    continue
+                if gap > 0:
                     self.dropped_packets += gap
-                    self._expected_seq = (seq + 1) & 0xFFFFFFFF
-                elif gap == 0:
-                    self._expected_seq = (seq + 1) & 0xFFFFFFFF
+                    zero_frame = np.zeros(FRAME_SAMPLES, dtype=np.int16)
+                    fill_count = min(gap, 500)
+                    for _ in range(fill_count):
+                        self._queue.put(zero_frame.copy())
+                self._expected_seq = (seq + 1) & 0xFFFFFFFF
 
             self.received_packets += 1
             raw_frame = data[4 : 4 + FRAME_BYTES]
             if len(raw_frame) < FRAME_BYTES:
                 raw_frame = raw_frame.ljust(FRAME_BYTES, b"\x00")
-            frame = np.frombuffer(raw_frame, dtype=np.int16).copy()
+            frame = to_int16(raw_frame)
             self._queue.put(frame)
 
     def read_frame(self, timeout_s: float | None = 0.2) -> np.ndarray | None:

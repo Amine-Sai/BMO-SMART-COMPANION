@@ -149,9 +149,26 @@ class BMOMQTTTester:
                 print(f"         {C_GRAY}{json.dumps(data['data'])}{C_RESET}")
 
         elif topic == VISION_CONTEXT:
-            ctx = data.get("context", {})
-            summary = ctx.get("summary", "")
-            req_id = data.get("request_id")
+            # Handle both legacy context format and new Scene model format
+            if "context" in data:
+                # Legacy format
+                ctx = data.get("context", {})
+                summary = ctx.get("summary", "")
+                req_id = data.get("request_id")
+            else:
+                # New Scene model format
+                summary = ""
+                if "people" in data and isinstance(data.get("people"), list):
+                    people_names = [p.get("name", "person") for p in data["people"] if isinstance(p, dict)]
+                    if people_names:
+                        summary = f"People: {', '.join(people_names)}"
+                if "objects" in data and isinstance(data.get("objects"), list):
+                    obj_str = ", ".join(data["objects"])
+                    if summary:
+                        summary += f" | Objects: {obj_str}"
+                    else:
+                        summary = f"Objects: {obj_str}"
+                req_id = None
             tag = f" {C_GRAY}(req: {req_id}){C_RESET}" if req_id else ""
             print(f"{C_GRAY}[{now_str}]{C_RESET} {C_YELLOW}{C_BOLD}[CONTEXT]{C_RESET}{tag} {summary}")
 

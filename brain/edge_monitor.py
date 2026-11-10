@@ -9,11 +9,17 @@ import numpy as np
 from bmo_contracts.models import HwEvent, HwStatus
 from bmo_contracts.topics import HW_EVENT, HW_STATUS
 from brain.audio.io import AudioSink, AudioSource
+from brain.settings import EdgeSettings
 from brain.state import BrainState, BrainStateMachine
 
 
 class EdgeMonitor:
-    """Monitors edge hardware status and events, managing mute state and audio fallback."""
+    """Monitors edge hardware status and events, managing mute state and audio fallback.
+
+    Failover debounce requires N consecutive opposite status messages before transitioning
+    between edge online and fallback state. Note: this debouncing slows failover transition
+    by up to N * heartbeat period (e.g. 3 * heartbeat period).
+    """
 
     def __init__(
         self,
@@ -24,6 +30,7 @@ class EdgeMonitor:
         edge_sink: AudioSink | None = None,
         heartbeat_timeout_s: float = 15.0,
         clock: Callable[[], float] = time.monotonic,
+        failover_debounce: int = EdgeSettings().failover_debounce,
     ) -> None:
         self._state_machine = state_machine
         self._fallback_source = fallback_source
@@ -32,10 +39,17 @@ class EdgeMonitor:
         self._edge_sink = edge_sink
         self._heartbeat_timeout_s = heartbeat_timeout_s
         self._clock = clock
+        self._failover_debounce = max(1, int(failover_debounce))
 
         self._muted: bool = False
         self._edge_online: bool = False
+        self._has_received_status: bool = False
+        self._consecutive_opposite: int = 0
         self._last_heartbeat_ts: float = 0.0
+
+    @property
+    def failover_debounce(self) -> int:
+        return self._failover_debounce
 
     @property
     def muted(self) -> bool:
@@ -78,11 +92,33 @@ class EdgeMonitor:
                     self._state_machine.transition(BrainState.IDLE)
 
     def handle_hw_status(self, status: HwStatus | bytes | str) -> None:
+        """Process incoming hardware status with failover debouncing.
+
+        The initial status received by the monitor is applied promptly. Subsequent status
+        changes require N consecutive opposite status messages before transitioning state
+        (N * heartbeat period delay).
+        """
         if isinstance(status, (bytes, str)):
             status = HwStatus.model_validate_json(status)
-        self._edge_online = bool(status.online)
-        if status.online:
-            self._last_heartbeat_ts = self._clock()
+        incoming = bool(status.online)
+        now = self._clock()
+        if incoming:
+            self._last_heartbeat_ts = now
+
+        if not self._has_received_status:
+            self._has_received_status = True
+            self._edge_online = incoming
+            self._consecutive_opposite = 0
+            return
+
+        if incoming == self._edge_online:
+            self._consecutive_opposite = 0
+            return
+
+        self._consecutive_opposite += 1
+        if self._consecutive_opposite >= self._failover_debounce:
+            self._edge_online = incoming
+            self._consecutive_opposite = 0
 
     def handle_mqtt_message(self, topic: str, payload: bytes | str) -> None:
         if topic == HW_EVENT:

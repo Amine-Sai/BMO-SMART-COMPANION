@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import os
 import struct
@@ -238,13 +239,50 @@ class SimpleMQTTBroker:
                 await s.send(out)
 
 
-async def main() -> None:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Lightweight asyncio MQTT broker.")
+    parser.add_argument(
+        "--host",
+        default=os.getenv("BMO_MQTT_HOST", "127.0.0.1"),
+        help="Host address to bind to (default: BMO_MQTT_HOST or 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.getenv("BMO_MQTT_PORT", "1883")),
+        help="Port to bind to (default: BMO_MQTT_PORT or 1883)",
+    )
+    parser.add_argument(
+        "--require-auth",
+        action="store_true",
+        default=os.getenv("BMO_MQTT_REQUIRE_AUTH", "0") in ("1", "true"),
+        help="Enforce client authentication",
+    )
+    parser.add_argument(
+        "--passwords-file",
+        "--passwords-path",
+        dest="passwords_file",
+        default=os.getenv("BMO_MQTT_PASSWORDS_PATH"),
+        help="Path to username:password file",
+    )
+    parser.add_argument(
+        "--acl-file",
+        "--acl-path",
+        dest="acl_file",
+        default=os.getenv("BMO_MQTT_ACL_PATH"),
+        help="Path to Mosquitto ACL file",
+    )
+    return parser.parse_args(argv)
+
+
+async def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
     broker = SimpleMQTTBroker(
-        os.getenv("BMO_MQTT_HOST", "127.0.0.1"),
-        int(os.getenv("BMO_MQTT_PORT", "1883")),
-        os.getenv("BMO_MQTT_REQUIRE_AUTH", "0") in ("1", "true"),
-        parse_passwords_file(os.getenv("BMO_MQTT_PASSWORDS_PATH")),
-        os.getenv("BMO_MQTT_ACL_PATH"),
+        host=args.host,
+        port=args.port,
+        require_auth=args.require_auth,
+        users=parse_passwords_file(args.passwords_file),
+        acl_path=args.acl_file,
     )
     await broker.start()
     try:
