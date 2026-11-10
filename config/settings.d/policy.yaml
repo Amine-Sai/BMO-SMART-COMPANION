@@ -6,3 +6,4 @@ policy:
   sign_min_conf: 0.75
   sign_debounce_s: 2.0
   idle_unload_s: 300.0
+  tick_interval_s: 1.0

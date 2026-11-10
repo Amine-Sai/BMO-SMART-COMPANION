@@ -5,3 +5,5 @@ llm:
   keep_alive: "5m"
   timeout_s: 10.0
   temperature: 0.2
+  history_turns: 6
+  history_max_tokens: 900

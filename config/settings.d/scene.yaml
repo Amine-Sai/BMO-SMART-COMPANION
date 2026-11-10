@@ -1,2 +1,3 @@
 scene:
   max_age_s: 10.0
+  max_prompt_tokens: 60

@@ -8,3 +8,6 @@ audio:
   stt_device: "cpu"
   stt_compute_type: "int8"
   tts_voice: "en_US-lessac-medium"
+  vad_chunk_samples: 512
+  vad_preroll_ms: 250
+  tts_max_clause_chars: 80

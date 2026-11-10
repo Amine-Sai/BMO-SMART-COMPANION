@@ -19,6 +19,8 @@ class LLMSettings(BaseModel):
     keep_alive: str = "5m"
     timeout_s: float = 30.0
     temperature: float = 0.7
+    history_turns: int = 6
+    history_max_tokens: int = 900
 
 
 class SceneSettings(BaseModel):
@@ -27,6 +29,7 @@ class SceneSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     max_age_s: float = 60.0
+    max_prompt_tokens: int = 60
 
 
 class AudioSettings(BaseModel):
@@ -43,6 +46,9 @@ class AudioSettings(BaseModel):
     stt_device: str = "cpu"
     stt_compute_type: str = "int8"
     tts_voice: str = "en_US-lessac-medium"
+    vad_chunk_samples: int = 512
+    vad_preroll_ms: int = 250
+    tts_max_clause_chars: int = 80
 
 
 class PolicySettings(BaseModel):
@@ -57,6 +63,15 @@ class PolicySettings(BaseModel):
     sign_min_conf: float
     sign_debounce_s: float
     idle_unload_s: float
+    tick_interval_s: float = 1.0
+
+
+class EdgeSettings(BaseModel):
+    """Configuration for edge hardware and failover."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    failover_debounce: int = 3
 
 
 class Settings(BaseModel):
@@ -68,6 +83,7 @@ class Settings(BaseModel):
     scene: SceneSettings | None = None
     audio: AudioSettings | None = None
     policy: PolicySettings | None = None
+    edge: EdgeSettings | None = None
 
 
 def load_settings(settings_dir: str | Path = "config/settings.d") -> Settings:
