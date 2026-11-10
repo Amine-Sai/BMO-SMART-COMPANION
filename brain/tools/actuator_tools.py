@@ -4,10 +4,14 @@ from pathlib import Path
 import time
 from typing import Any, Callable
 
-from pydantic import BaseModel, Field
 import yaml
 
-from bmo_contracts.models import HwCmd
+from bmo_contracts.models import (
+    HwCmd,
+    MoveServoArgs,
+    PlaySoundArgs,
+    SetExpressionArgs,
+)
 from bmo_contracts.topics import HW_CMD
 from brain.tools.registry import ToolRegistry, ToolSpec
 
@@ -22,34 +26,22 @@ __all__ = [
 ]
 
 
-class SetExpressionArgs(BaseModel):
-    expression: str = Field(default="", description="Facial expression name")
-    emotion: str = Field(default="", description="Facial expression name")
-
-    def get_expression(self) -> str:
-        return self.expression or self.emotion
-
-
-class MoveServoArgs(BaseModel):
-    id: str = Field(description="Servo identifier, e.g. pan or tilt")
-    angle: float = Field(description="Target angle in degrees")
-
-
-class PlaySoundArgs(BaseModel):
-    sound: str = Field(default="", description="Sound effect name to play")
-    name: str = Field(default="", description="Sound effect name to play")
-
-    def get_sound(self) -> str:
-        return self.sound or self.name
-
-
-class ActuatorLimits(BaseModel):
-    emotions: list[str] = Field(default_factory=list)
-    servos: dict[str, Any] = Field(default_factory=dict)
-    min_interval_s: float = 0.25
-    max_deg_per_sec: float = 180.0
-    watchdog_timeout_ms: int = 1000
-    sounds: list[str] = Field(default_factory=list)
+class ActuatorLimits:
+    def __init__(
+        self,
+        emotions: list[str] | None = None,
+        servos: dict[str, Any] | None = None,
+        min_interval_s: float = 0.25,
+        max_deg_per_sec: float = 180.0,
+        watchdog_timeout_ms: int = 1000,
+        sounds: list[str] | None = None,
+    ) -> None:
+        self.emotions = emotions or []
+        self.servos = servos or {}
+        self.min_interval_s = min_interval_s
+        self.max_deg_per_sec = max_deg_per_sec
+        self.watchdog_timeout_ms = watchdog_timeout_ms
+        self.sounds = sounds or []
 
 
 def load_limits(path: Path | str = "config/limits.yaml") -> ActuatorLimits:
@@ -160,13 +152,13 @@ class ActuatorTools:
         **kwargs: Any,
     ) -> dict[str, Any]:
         if isinstance(expression, SetExpressionArgs):
-            expr_val = expression.get_expression()
+            expr_val = expression.get_emotion().value
         elif isinstance(expression, dict):
-            expr_val = str(expression.get("expression") or expression.get("emotion") or "")
+            expr_val = str(expression.get("emotion") or expression.get("expression") or "")
         elif expression is not None:
             expr_val = str(expression)
         else:
-            expr_val = str(kwargs.get("expression") or kwargs.get("emotion") or "")
+            expr_val = str(kwargs.get("emotion") or kwargs.get("expression") or "")
 
         if expr_val not in self.limits.emotions:
             return {"ok": False, "error": f"unknown expression: {expr_val}"}
@@ -176,7 +168,7 @@ class ActuatorTools:
                 id=f"expr-{expr_val}-{int(self.clock() * 1000)}",
                 target="esp32",
                 action="set_expression",
-                args={"expression": expr_val},
+                args={"emotion": expr_val},
             )
             self.bus.publish(HW_CMD, cmd)
 
@@ -188,13 +180,13 @@ class ActuatorTools:
         **kwargs: Any,
     ) -> dict[str, Any]:
         if isinstance(sound, PlaySoundArgs):
-            sound_val = sound.get_sound()
+            sound_val = sound.get_name()
         elif isinstance(sound, dict):
-            sound_val = str(sound.get("sound") or sound.get("name") or "")
+            sound_val = str(sound.get("name") or sound.get("sound") or "")
         elif sound is not None:
             sound_val = str(sound)
         else:
-            sound_val = str(kwargs.get("sound") or kwargs.get("name") or "")
+            sound_val = str(kwargs.get("name") or kwargs.get("sound") or "")
 
         if sound_val not in self.limits.sounds:
             return {"ok": False, "error": f"unknown sound: {sound_val}"}
@@ -204,7 +196,7 @@ class ActuatorTools:
                 id=f"sound-{sound_val}-{int(self.clock() * 1000)}",
                 target="esp32",
                 action="play_sound",
-                args={"sound": sound_val},
+                args={"name": sound_val},
             )
             self.bus.publish(HW_CMD, cmd)
 
