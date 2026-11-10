@@ -136,9 +136,13 @@ def test_edge_status_and_heartbeat_timeout_fallback() -> None:
     assert monitor.active_source is edge_source
     assert monitor.active_sink is edge_sink
 
-    # Edge sends offline status explicitly
+    # Edge sends offline status explicitly (debounced by failover_debounce=3)
     clock_time = 121.0
     offline_status = HwStatus(online=False, ts=3.0, capabilities=[])
+    monitor.handle_hw_status(offline_status)
+    assert monitor.edge_online is True
+    monitor.handle_hw_status(offline_status)
+    assert monitor.edge_online is True
     monitor.handle_hw_status(offline_status)
     assert monitor.edge_online is False
     assert monitor.active_source is fallback_source
@@ -192,3 +196,100 @@ def test_no_edge_devices_provided() -> None:
     assert monitor.edge_online is False
     assert monitor.active_source is fallback_source
     assert monitor.active_sink is fallback_sink
+
+
+def test_failover_debounce_toggling_heartbeat_does_not_flap() -> None:
+    clock_time = 200.0
+
+    def fake_clock() -> float:
+        return clock_time
+
+    sm = BrainStateMachine(publish_fn=_dummy_publish)
+    fallback_source = _create_source()
+    fallback_sink = _create_sink()
+    edge_source = _create_source()
+    edge_sink = _create_sink()
+
+    monitor = EdgeMonitor(
+        state_machine=sm,
+        fallback_source=fallback_source,
+        fallback_sink=fallback_sink,
+        edge_source=edge_source,
+        edge_sink=edge_sink,
+        clock=fake_clock,
+    )
+    assert monitor.failover_debounce == 3
+
+    # Initial status applies promptly
+    monitor.handle_hw_status(HwStatus(online=True, ts=clock_time, capabilities=["mic", "speaker"]))
+    assert monitor.edge_online is True
+
+    # Toggling status online/offline does not flap while online
+    for i in range(10):
+        clock_time += 1.0
+        monitor.handle_hw_status(HwStatus(online=False, ts=clock_time, capabilities=[]))
+        assert monitor.edge_online is True, f"Flapped to False at cycle {i}"
+        clock_time += 1.0
+        monitor.handle_hw_status(HwStatus(online=True, ts=clock_time, capabilities=["mic", "speaker"]))
+        assert monitor.edge_online is True, f"Flapped at cycle {i}"
+
+    # Flip to offline with 3 consecutive offline statuses
+    for _ in range(2):
+        clock_time += 1.0
+        monitor.handle_hw_status(HwStatus(online=False, ts=clock_time, capabilities=[]))
+        assert monitor.edge_online is True
+    clock_time += 1.0
+    monitor.handle_hw_status(HwStatus(online=False, ts=clock_time, capabilities=[]))
+    assert monitor.edge_online is False
+    assert monitor.active_source is fallback_source
+    assert monitor.active_sink is fallback_sink
+
+    # Toggling status while offline does not flap
+    for i in range(10):
+        clock_time += 1.0
+        monitor.handle_hw_status(HwStatus(online=True, ts=clock_time, capabilities=["mic", "speaker"]))
+        assert monitor.edge_online is False, f"Flapped to True at cycle {i}"
+        clock_time += 1.0
+        monitor.handle_hw_status(HwStatus(online=False, ts=clock_time, capabilities=[]))
+        assert monitor.edge_online is False, f"Flapped at cycle {i}"
+
+    # Flip back to online with 3 consecutive online statuses
+    for _ in range(2):
+        clock_time += 1.0
+        monitor.handle_hw_status(HwStatus(online=True, ts=clock_time, capabilities=["mic", "speaker"]))
+        assert monitor.edge_online is False
+    clock_time += 1.0
+    monitor.handle_hw_status(HwStatus(online=True, ts=clock_time, capabilities=["mic", "speaker"]))
+    assert monitor.edge_online is True
+    assert monitor.active_source is edge_source
+    assert monitor.active_sink is edge_sink
+
+
+def test_failover_debounce_custom_threshold() -> None:
+    sm = BrainStateMachine(publish_fn=_dummy_publish)
+    fallback_source = _create_source()
+    fallback_sink = _create_sink()
+    edge_source = _create_source()
+    edge_sink = _create_sink()
+
+    monitor = EdgeMonitor(
+        state_machine=sm,
+        fallback_source=fallback_source,
+        fallback_sink=fallback_sink,
+        edge_source=edge_source,
+        edge_sink=edge_sink,
+        failover_debounce=2,
+    )
+    assert monitor.failover_debounce == 2
+
+    # Prompt initial status
+    monitor.handle_hw_status(HwStatus(online=True, ts=1.0, capabilities=["mic", "speaker"]))
+    assert monitor.edge_online is True
+
+    # 1st offline status does not flip
+    monitor.handle_hw_status(HwStatus(online=False, ts=2.0, capabilities=[]))
+    assert monitor.edge_online is True
+
+    # 2nd consecutive offline status flips with debounce=2
+    monitor.handle_hw_status(HwStatus(online=False, ts=3.0, capabilities=[]))
+    assert monitor.edge_online is False

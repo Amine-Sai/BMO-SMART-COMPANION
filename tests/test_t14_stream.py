@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 from brain.llm import ChatChunk
+from brain.settings import AudioSettings
 from brain.stream import SentenceSplitter, split_sentences
 
 TRICKY_CASES: list[tuple[str, list[str]]] = [
@@ -289,3 +290,94 @@ def test_empty_and_whitespace_chunks() -> None:
     assert splitter.feed("   \n\t  ") == []
     assert splitter.feed(ChatChunk(text="")) == []
     assert list(splitter.flush()) == []
+
+
+def test_numeric_list_not_split() -> None:
+    splitter = SentenceSplitter()
+    assert splitter.feed("1. Item") == []
+    assert list(splitter.flush()) == ["1. Item"]
+
+    assert list(split_sentences(["1. Item. ", "2. Another item."])) == [
+        "1. Item.",
+        "2. Another item.",
+    ]
+    assert list(split_sentences(["1. Item\n2. Another item"])) == [
+        "1. Item",
+        "2. Another item",
+    ]
+    assert list(split_sentences(["Step 1. Check this carefully."])) == [
+        "Step 1. Check this carefully.",
+    ]
+
+
+def test_dr_smith_not_split() -> None:
+    splitter = SentenceSplitter()
+    assert splitter.feed("Dr. Smith visited yesterday. ") == [
+        "Dr. Smith visited yesterday."
+    ]
+    tokens = ["Dr.", " Smith", " arrived.", " He", " spoke."]
+    assert list(split_sentences(tokens)) == ["Dr. Smith arrived.", "He spoke."]
+
+
+def test_decimals_not_oversplit() -> None:
+    splitter = SentenceSplitter()
+    assert splitter.feed("The value is 3.5 for now. ") == ["The value is 3.5 for now."]
+    tokens = ["The multiplier is 3.", "5 times higher. Next sentence."]
+    assert list(split_sentences(tokens)) == [
+        "The multiplier is 3.5 times higher.",
+        "Next sentence.",
+    ]
+
+
+def test_clause_split_delimiters_and_space() -> None:
+    # Comma split
+    s_comma = SentenceSplitter(max_clause_chars=50)
+    out = s_comma.feed("This is a clause before comma, and this is another clause that exceeds limit")
+    assert out == ["This is a clause before comma,"]
+    assert list(s_comma.flush()) == ["and this is another clause that exceeds limit"]
+
+    # Semicolon split
+    s_semi = SentenceSplitter(max_clause_chars=50)
+    out = s_semi.feed("This is a clause before semi; and this is another clause that exceeds limit")
+    assert out == ["This is a clause before semi;"]
+    assert list(s_semi.flush()) == ["and this is another clause that exceeds limit"]
+
+    # Colon split
+    s_colon = SentenceSplitter(max_clause_chars=50)
+    out = s_colon.feed("Here is a header before colon: and this is another clause that exceeds limit")
+    assert out == ["Here is a header before colon:"]
+    assert list(s_colon.flush()) == ["and this is another clause that exceeds limit"]
+
+    # Space split (no clause punctuation)
+    s_space = SentenceSplitter(max_clause_chars=50)
+    out = s_space.feed("This is a sentence with no punctuation whatsoever that exceeds the limit")
+    assert out == ["This is a sentence with no punctuation whatsoever"]
+    assert list(s_space.flush()) == ["that exceeds the limit"]
+
+
+def test_clause_split_settings_default() -> None:
+    splitter = SentenceSplitter()
+    assert splitter.max_clause_chars == AudioSettings().tts_max_clause_chars
+    assert splitter.max_clause_chars == 80
+
+
+def test_clause_split_streaming_eagerness() -> None:
+    splitter = SentenceSplitter(max_clause_chars=35)
+    tokens = ["This ", "is ", "an ", "unpunctuated ", "stream ", "that ", "never ", "ends"]
+    emitted: list[str] = []
+    tokens_consumed_at_first: int | None = None
+    for i, tok in enumerate(tokens):
+        out = splitter.feed(tok)
+        if out and tokens_consumed_at_first is None:
+            tokens_consumed_at_first = i + 1
+        emitted.extend(out)
+
+    assert tokens_consumed_at_first is not None
+    # Clause is emitted before all tokens finish yielding
+    assert tokens_consumed_at_first < len(tokens)
+    emitted.extend(splitter.flush())
+    assert emitted == [
+        "This is an unpunctuated stream",
+        "that never ends",
+    ]
+

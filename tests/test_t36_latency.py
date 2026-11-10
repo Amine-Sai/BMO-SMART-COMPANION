@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import threading
+import time
 from typing import Any
 
 import numpy as np
@@ -16,10 +17,17 @@ from brain.audio.wake import WakeWordDetector
 from brain.llm import ChatChunk, LLMClient
 from brain.logging_jsonl import JSONLLogger
 from brain.prompt import PromptBuilder
+from brain.settings import AudioSettings, LLMSettings, Settings, load_settings
 from brain.state import BrainStateMachine
 from brain.telemetry import LatencyTracker, TurnMetrics
 from brain.tools.registry import ToolRegistry
 from brain.turn import TurnManager
+from tools.fetch_assets import (
+    DEFAULT_MODELS_DIR,
+    check_ollama,
+    fetch_openwakeword_models,
+    fetch_piper_voice,
+)
 
 
 def _noop_publish(_topic: str, _payload: bytes, _qos: int = 1, _retain: bool = False) -> None:
@@ -233,4 +241,111 @@ def test_turn_manager_integration_20_turns() -> None:
 @pytest.mark.gpu
 @pytest.mark.slow
 def test_real_model_latency_pipeline() -> None:
-    pytest.skip("Real model GPU evaluation skipped when model weights are not loaded")
+    pytest.importorskip("faster_whisper")
+    pytest.importorskip("piper")
+    pytest.importorskip("openwakeword")
+    pytest.importorskip("torch")
+    pytest.importorskip("silero_vad")
+    pytest.importorskip("httpx")
+
+    try:
+        settings = load_settings(DEFAULT_MODELS_DIR.parent / "config" / "settings.d")
+    except Exception:
+        settings = Settings()
+    audio_settings = settings.audio or AudioSettings()
+    llm_settings = settings.llm or LLMSettings()
+
+    ollama_status = check_ollama()
+    if not ollama_status.get("daemon_running"):
+        pytest.skip("Ollama daemon is not running (requires escalation H2)")
+
+    import httpx
+
+    try:
+        resp = httpx.get(f"{llm_settings.host}/api/tags", timeout=1.0)
+        if resp.status_code != 200:
+            pytest.skip(f"Ollama daemon returned status {resp.status_code}")
+        models = [m.get("name", "") for m in resp.json().get("models", [])]
+        if not any(llm_settings.model in name for name in models):
+            pytest.skip(f"Ollama model '{llm_settings.model}' not loaded")
+    except Exception as exc:
+        pytest.skip(f"Ollama connection error: {exc}")
+
+    try:
+        from faster_whisper import WhisperModel
+
+        _ = WhisperModel(
+            audio_settings.stt_model,
+            device=audio_settings.stt_device,
+            compute_type=audio_settings.stt_compute_type,
+            local_files_only=True,
+        )
+    except Exception as exc:
+        pytest.skip(f"Faster-whisper model weights not cached: {exc}")
+
+    piper_status = fetch_piper_voice(
+        audio_settings.tts_voice,
+        target_dir=DEFAULT_MODELS_DIR / "piper",
+        fetch_remote=False,
+    )
+    if not piper_status.get("ok"):
+        pytest.skip(f"Piper voice weights not cached for '{audio_settings.tts_voice}'")
+
+    oww_status = fetch_openwakeword_models(download_fn=lambda _: None)
+    if not oww_status.get("ok"):
+        pytest.skip("openWakeWord model weights not cached")
+
+    try:
+        from silero_vad import load_silero_vad
+
+        _ = load_silero_vad()
+    except Exception as exc:
+        pytest.skip(f"Silero VAD model not available: {exc}")
+
+    sm = BrainStateMachine(publish_fn=_noop_publish)
+    wake = WakeWordDetector(settings=audio_settings)
+    vad = VoiceActivityDetector(settings=audio_settings)
+    stt = SpeechToText(settings=audio_settings)
+    llm = LLMClient(settings=llm_settings)
+    prompt_builder = MockPromptBuilder()
+    tools = ToolRegistry()
+    tts = TextToSpeech(
+        settings=audio_settings,
+        model_path=piper_status.get("onnx_path"),
+    )
+    sink = MemorySink()
+    tracker = LatencyTracker()
+
+    manager = TurnManager(
+        state_machine=sm,
+        wake=wake,
+        vad=vad,
+        stt=stt,
+        llm=llm,
+        prompt_builder=prompt_builder,
+        tools=tools,
+        tts=tts,
+        sink=sink,
+        on_turn_metrics=tracker.on_turn_metrics,
+    )
+
+    wake_score = wake.score_frame(np.zeros(1280, dtype=np.int16))
+    assert 0.0 <= wake_score <= 1.0
+
+    vad_prob = vad.speech_probability(np.zeros(320, dtype=np.int16))
+    assert 0.0 <= vad_prob <= 1.0
+
+    stt_res = stt.transcribe(np.zeros(16000, dtype=np.int16))
+    stt_ms = stt_res.latency_ms if stt_res is not None else 50.0
+
+    reply = manager.run_text_turn("Hello BMO", vad_end_ts=time.perf_counter(), stt_ms=stt_ms)
+    assert reply
+    assert len(tracker.records) == 1
+    record = tracker.records[0]
+    assert record.total_ms > 0.0
+    assert record.llm_ttft_ms >= 0.0
+    assert record.tts_first_chunk_ms >= 0.0
+
+    summary = tracker.summary()
+    assert summary["total_ms"]["count"] == 1.0
+    assert summary["total_ms"]["p50"] > 0.0

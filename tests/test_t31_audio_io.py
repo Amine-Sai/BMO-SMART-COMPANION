@@ -16,8 +16,9 @@ from brain.audio.io import (
     MemorySource,
     SoundDeviceSink,
     SoundDeviceSource,
+    to_int16,
 )
-from brain.settings import load_settings
+from brain.settings import AudioSettings, load_settings
 
 
 def test_audio_settings_load() -> None:
@@ -35,10 +36,63 @@ def test_audio_settings_load() -> None:
 
 
 def test_audio_constants() -> None:
+    defaults = AudioSettings()
+    assert SAMPLE_RATE == defaults.sample_rate
+    assert FRAME_MS == defaults.frame_ms
+    assert FRAME_SAMPLES == int(defaults.sample_rate * defaults.frame_ms / 1000)
+    assert FRAME_BYTES == FRAME_SAMPLES * 2
     assert SAMPLE_RATE == 16000
     assert FRAME_MS == 20
     assert FRAME_SAMPLES == 320
     assert FRAME_BYTES == 640
+
+
+def test_to_int16_conversions() -> None:
+    # bytes input
+    raw = np.array([100, -200, 32767, -32768], dtype=np.int16).tobytes()
+    res = to_int16(raw)
+    assert res.dtype == np.int16
+    assert np.array_equal(res, [100, -200, 32767, -32768])
+
+    # int16 ndarray input
+    int_arr = np.array([1, 2, 3], dtype=np.int16)
+    assert np.array_equal(to_int16(int_arr), int_arr)
+
+    # float input [-1.0, 1.0] scaling
+    floats = np.array([0.0, 1.0, -1.0, 0.5, -0.5], dtype=np.float32)
+    converted = to_int16(floats)
+    assert converted.dtype == np.int16
+    assert converted[0] == 0
+    assert converted[1] == 32767
+    assert converted[2] == -32767
+    assert converted[3] == 16384
+    assert converted[4] == -16384
+
+    # float clipping outside [-1.0, 1.0]
+    out_of_bounds = np.array([2.5, -3.0], dtype=np.float64)
+    clipped = to_int16(out_of_bounds)
+    assert np.array_equal(clipped, [32767, -32767])
+
+
+def test_memory_sink_and_source_with_floats() -> None:
+    # Float inputs should be scaled into int16, not truncated to zero
+    float_audio = np.array([0.5, -0.5, 0.25], dtype=np.float32)
+    sink = MemorySink()
+    sink.write_samples(float_audio)
+    samples = sink.get_samples()
+    assert samples.dtype == np.int16
+    assert not np.all(samples == 0)
+    assert np.array_equal(samples, [16384, -16384, 8192])
+    sink.close()
+
+    source = MemorySource(float_audio)
+    frame = source.read_frame()
+    assert frame is not None
+    assert frame.dtype == np.int16
+    assert frame[0] == 16384
+    assert frame[1] == -16384
+    assert frame[2] == 8192
+    source.close()
 
 
 def test_loopback_sine_wave_roundtrip() -> None:

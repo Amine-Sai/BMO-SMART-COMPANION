@@ -711,7 +711,6 @@ def run_pipeline(
 
                     elif cmd_type == "get_context":
                         ctx_snapshot = short_term_memory.get_llm_context()
-                        mqtt_bridge.publish_context(ctx_snapshot, request_id=req_id)
                         mqtt_bridge.publish_response(cmd_type, "success", {"context": ctx_snapshot}, req_id)
 
                     elif cmd_type == "set_mode":
@@ -1066,7 +1065,7 @@ def run_pipeline(
 
                 if now_sec - last_context_pub_time > 5.0:
                     if person_present or short_term_memory.current_objects:
-                        mqtt_bridge.publish_context(short_term_memory.get_llm_context())
+                        # Legacy context publishing removed; publish_scene handles Scene model
                         last_context_pub_time = now_sec
 
             # ---------------------------------------------------------------

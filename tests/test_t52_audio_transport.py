@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import inspect
+import socket
+import struct
 import time
 
 import numpy as np
@@ -125,3 +127,84 @@ def test_zero_mqtt_usage() -> None:
     assert "mqtt" not in source.lower()
     topic_prefix = "bmo" + "/"
     assert topic_prefix not in source
+
+
+def test_udp_audio_receiver_drops_late_packets() -> None:
+    receiver = UDPAudioReceiver(host="127.0.0.1", port=0)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        f0 = np.full(FRAME_SAMPLES, 100, dtype=np.int16)
+        f1 = np.full(FRAME_SAMPLES, 200, dtype=np.int16)
+        f2 = np.full(FRAME_SAMPLES, 300, dtype=np.int16)
+
+        # Send seq 0
+        sock.sendto(struct.pack("!I", 0) + f0.tobytes(), ("127.0.0.1", receiver.port))
+        # Send seq 2 (causes gap of 1 for seq 1)
+        sock.sendto(struct.pack("!I", 2) + f2.tobytes(), ("127.0.0.1", receiver.port))
+        # Send seq 1 (late packet, older than seq 2)
+        sock.sendto(struct.pack("!I", 1) + f1.tobytes(), ("127.0.0.1", receiver.port))
+
+        time.sleep(0.05)
+
+        # Receiver should yield: f0, zero-fill for missing 1, f2.
+        # Late packet seq 1 must be dropped, not queued.
+        r0 = receiver.read_frame(timeout_s=0.5)
+        r1_fill = receiver.read_frame(timeout_s=0.5)
+        r2 = receiver.read_frame(timeout_s=0.5)
+        r_none = receiver.read_frame(timeout_s=0.1)
+
+        assert r0 is not None and np.array_equal(r0, f0)
+        assert r1_fill is not None and np.all(r1_fill == 0)
+        assert r2 is not None and np.array_equal(r2, f2)
+        assert r_none is None
+        assert receiver.late_packets == 1
+        assert receiver.dropped_packets == 1
+    finally:
+        sock.close()
+        receiver.close()
+
+
+def test_udp_audio_receiver_gap_filling() -> None:
+    receiver = UDPAudioReceiver(host="127.0.0.1", port=0)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        f0 = np.full(FRAME_SAMPLES, 500, dtype=np.int16)
+        f3 = np.full(FRAME_SAMPLES, 800, dtype=np.int16)
+
+        # Send seq 0, skip seq 1 and seq 2, send seq 3
+        sock.sendto(struct.pack("!I", 0) + f0.tobytes(), ("127.0.0.1", receiver.port))
+        sock.sendto(struct.pack("!I", 3) + f3.tobytes(), ("127.0.0.1", receiver.port))
+
+        time.sleep(0.05)
+
+        r0 = receiver.read_frame(timeout_s=0.5)
+        r1 = receiver.read_frame(timeout_s=0.5)
+        r2 = receiver.read_frame(timeout_s=0.5)
+        r3 = receiver.read_frame(timeout_s=0.5)
+        r_end = receiver.read_frame(timeout_s=0.1)
+
+        assert r0 is not None and np.array_equal(r0, f0)
+        assert r1 is not None and np.all(r1 == 0)
+        assert r2 is not None and np.all(r2 == 0)
+        assert r3 is not None and np.array_equal(r3, f3)
+        assert r_end is None
+        assert receiver.dropped_packets == 2
+    finally:
+        sock.close()
+        receiver.close()
+
+
+def test_udp_sender_float_audio() -> None:
+    receiver = UDPAudioReceiver(host="127.0.0.1", port=0)
+    sender = UDPAudioSender(host="127.0.0.1", port=receiver.port)
+    try:
+        float_samples = np.full(FRAME_SAMPLES, 0.5, dtype=np.float32)
+        sender.send_pcm(float_samples)
+
+        frame = receiver.read_frame(timeout_s=0.5)
+        assert frame is not None
+        assert frame.dtype == np.int16
+        assert np.all(frame == 16384)
+    finally:
+        sender.close()
+        receiver.close()
