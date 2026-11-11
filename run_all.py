@@ -256,7 +256,9 @@ def run_brain_voice(scene_cache: SceneCache) -> None:
             use_mlock=False,
         )
         llm = LoggingLLMClient(LLMClient(llm_settings))
+        print(">>> Loading Qwen model into memory (first load may take 30-60s on CPU)...", flush=True)
         llm.prewarm()
+        print(">>> Qwen model ready.", flush=True)
 
         prompt_builder = PromptBuilder(scene_cache, SceneSettings())
         tools = ToolRegistry()
@@ -349,6 +351,7 @@ def run_text_input(turn_manager: "TurnManager") -> None:
 
         # Feed typed text into the same pipeline as voice input.
         # start_text_turn handles joining any existing _active_thread.
+        print(f">>> Sending to BMO: {text}", flush=True)
         try:
             turn_manager.start_text_turn(text)
         except Exception as exc:

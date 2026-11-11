@@ -180,6 +180,8 @@ class TurnManager:
         splitter = SentenceSplitter()
         reply_chunks: list[str] = []
 
+        logger.info("LLM chat starting for user text: %r", user_text[:80])
+
         def _speak_sentence(sentence: str) -> None:
             nonlocal first_sentence_emitted, tts_first_chunk_ms
             clean = sentence.strip()
@@ -218,30 +220,34 @@ class TurnManager:
                     )
                 self._tts.speak_sentence(clean, self._sink, cancel_event=self.cancel_event)
 
-        for chunk in self._llm.chat(
-            messages,
-            tools=self._tools.ollama_tools(),
-            stream=True,
-            cancel_event=self.cancel_event,
-        ):
-            if self.cancel_event.is_set():
-                break
-            if not first_chunk_seen:
-                first_chunk_seen = True
-                llm_ttft_ms = (self._clock() - t_llm_start) * 1000.0
+        try:
+            for chunk in self._llm.chat(
+                messages,
+                tools=self._tools.ollama_tools(),
+                stream=True,
+                cancel_event=self.cancel_event,
+            ):
+                if self.cancel_event.is_set():
+                    break
+                if not first_chunk_seen:
+                    first_chunk_seen = True
+                    llm_ttft_ms = (self._clock() - t_llm_start) * 1000.0
 
-            if chunk.tool_call is not None:
-                self._tools.dispatch(chunk.tool_call, confirmed=confirmed)
+                if chunk.tool_call is not None:
+                    self._tools.dispatch(chunk.tool_call, confirmed=confirmed)
 
-            if chunk.text:
-                reply_chunks.append(chunk.text)
-                fed = splitter.feed(chunk.text)
-                if fed is not None:
-                    sentences = [fed] if isinstance(fed, str) else list(fed)
-                    for s in sentences:
-                        _speak_sentence(s)
-                        if self.cancel_event.is_set():
-                            break
+                if chunk.text:
+                    reply_chunks.append(chunk.text)
+                    fed = splitter.feed(chunk.text)
+                    if fed is not None:
+                        sentences = [fed] if isinstance(fed, str) else list(fed)
+                        for s in sentences:
+                            _speak_sentence(s)
+                            if self.cancel_event.is_set():
+                                break
+        except Exception as exc:
+            logger.error("LLM chat failed: %s", exc, exc_info=True)
+            reply_chunks.append(f"[LLM error: {exc}]")
 
         if not self.cancel_event.is_set():
             flushed = splitter.flush()
