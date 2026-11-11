@@ -86,10 +86,10 @@ def start_scene_subscriber(scene_cache) -> None:
                 scene = Scene.model_validate_json(msg.payload)
                 scene_cache.update_scene(scene)
                 people = [(p.name, p.track_id) for p in (scene.people or [])]
-                logger.info("Scene update from CV: people=%s", people)
+                logger.debug("Scene update from CV: people=%s", people)
             elif msg.topic == VISION_STATUS:
                 scene_cache.update_status(msg.payload)
-                logger.info("Vision status update from CV")
+                logger.debug("Vision status update from CV")
         except Exception as exc:
             logger.warning("Invalid payload on %s: %s", msg.topic, exc)
 
@@ -276,6 +276,10 @@ def run_brain_voice(scene_cache) -> None:
         )
 
         source = SoundDeviceSource(AUDIO_SETTINGS.sample_rate)
+
+        print("\n" + "=" * 60, flush=True)
+        print("  BMO IS READY — type a message at the > prompt, or say 'hey jarvis'", flush=True)
+        print("=" * 60 + "\n", flush=True)
 
         # Start text input thread (typed messages share the same LLM->TTS pipeline)
         global _text_thread
