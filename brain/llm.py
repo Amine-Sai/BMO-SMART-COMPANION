@@ -177,6 +177,7 @@ class LlamaCppBackend:
     def _load(self) -> Llama:
         if self._llm is None:
             # host field contains the model path for local backend
+            started = time.perf_counter()
             self._llm = Llama(
                 model_path=self._model_path,
                 n_ctx=self._s.num_ctx,
@@ -187,7 +188,44 @@ class LlamaCppBackend:
                 use_mlock=self._s.use_mlock,
                 verbose=False,
             )
+            logger.info(
+                "llama-cpp model loaded in %.2fs: %s",
+                time.perf_counter() - started,
+                self._model_path,
+            )
+            self._check_gpu_offload()
         return self._llm
+
+    def _check_gpu_offload(self) -> None:
+        """Warn loudly when n_gpu_layers was requested but this build has no CUDA."""
+        # instance lookup also resolves the newer static method; absent in old builds
+        probe = getattr(self._llm, "supports_gpu_offload", None)
+        try:
+            supported = bool(probe()) if callable(probe) else False
+        except Exception as exc:  # capability probe must never break loading
+            logger.warning("llama-cpp GPU offload probe failed: %s", exc)
+            supported = False
+        if self._s.n_gpu_layers != 0 and not supported:
+            logger.error(
+                "llama-cpp-python has no GPU offload support (CPU-only build): "
+                "requested n_gpu_layers=%d was ignored and the model will run on CPU. "
+                'Fix: rebuild with CUDA, e.g. CMAKE_ARGS="-DGGML_CUDA=on" '
+                "pip install --force-reinstall --no-cache-dir llama-cpp-python",
+                self._s.n_gpu_layers,
+            )
+
+    @staticmethod
+    def _log_chat_timings(started: float, first_token_at: float | None, tokens: int) -> None:
+        end = time.perf_counter()
+        if first_token_at is None:
+            logger.info("llama-cpp completion %.2fs (%d tok)", end - started, tokens)
+            return
+        logger.info("llama-cpp TTFT %.2fs", first_token_at - started)
+        decode_s = end - first_token_at
+        if tokens and decode_s > 0:
+            logger.info(
+                "llama-cpp %.1f tok/s (%d tok in %.2fs)", tokens / decode_s, tokens, decode_s
+            )
 
     def chat(
         self,
@@ -198,10 +236,14 @@ class LlamaCppBackend:
     ) -> Iterator[ChatChunk]:
         if cancel_event and cancel_event.is_set():
             return
+        # measure end-to-end latency: cold calls include model load in TTFT
+        started = time.perf_counter()
         llm = self._load()
 
         # Use proper chat format for Qwen models
         prompt = self._messages_to_chat_format(messages, tools)
+        first_token_at: float | None = None
+        tokens = 0
 
         try:
             if stream:
@@ -218,7 +260,11 @@ class LlamaCppBackend:
                     delta = chunk.get("choices", [{}])[0].get("delta", {})
                     text = delta.get("content", "")
                     if text:
+                        if first_token_at is None:
+                            first_token_at = time.perf_counter()
+                        tokens += count_tokens(text)
                         yield ChatChunk(text=text)
+                self._log_chat_timings(started, first_token_at, tokens)
                 yield ChatChunk(done=True)
             else:
                 result = llm.create_chat_completion(
@@ -230,6 +276,7 @@ class LlamaCppBackend:
                     stream=False,
                 )
                 text = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+                self._log_chat_timings(started, None, count_tokens(text))
                 yield ChatChunk(text=text, done=True)
         except Exception as exc:
             logger.error("llama-cpp inference error: %s", exc)
