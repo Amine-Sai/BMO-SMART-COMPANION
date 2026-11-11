@@ -1,0 +1,28 @@
+# Virtual Environments
+.gitignore
+.venv/
+env/
+venv/
+
+# Progression & Local Notes
+PROGRESS.md
+AUDIT.md
+DEMO_COORD.md
+
+# Python cache & artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+graphify-out/
+docs/
+# Model weights & downloads (auto-downloaded on first run)
+weights/
+assistant_cv/models/*.pt
+assistant_cv/models/*.task
+assistant_cv/models/*.onnx
+
+# Local biometric & dataset directories
+assistant_cv/gallery/
+assistant_cv/data/*/*.npy
