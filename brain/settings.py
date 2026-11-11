@@ -20,8 +20,8 @@ class LLMSettings(BaseModel):
     keep_alive: str = "5m"
     timeout_s: float = 30.0
     temperature: float = 0.7
-    history_turns: int = 6
-    history_max_tokens: int = 900
+    history_turns: int = 3
+    history_max_tokens: int = 250
     # llamacpp optimization settings
     n_gpu_layers: int = -1  # -1 = all layers on GPU (if available), 0 = CPU only
     n_threads: int = 8

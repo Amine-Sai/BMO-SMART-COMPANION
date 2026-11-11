@@ -28,8 +28,8 @@ def test_load_settings_contains_all_tunables_with_defaults() -> None:
     assert settings.scene.max_prompt_tokens == 60
 
     # llm
-    assert settings.llm.history_turns == 6
-    assert settings.llm.history_max_tokens == 900
+    assert settings.llm.history_turns == 3
+    assert settings.llm.history_max_tokens == 250
 
     # audio
     assert settings.audio is not None
@@ -49,8 +49,8 @@ def test_load_settings_contains_all_tunables_with_defaults() -> None:
 def test_settings_classes_default_instantiation() -> None:
     """Verify default values on individual model classes without YAML input."""
     assert SceneSettings().max_prompt_tokens == 60
-    assert LLMSettings().history_turns == 6
-    assert LLMSettings().history_max_tokens == 900
+    assert LLMSettings().history_turns == 3
+    assert LLMSettings().history_max_tokens == 250
     assert AudioSettings().vad_chunk_samples == 512
     assert AudioSettings().vad_preroll_ms == 250
     assert AudioSettings().tts_max_clause_chars == 80

@@ -171,7 +171,6 @@ def run_brain_voice(scene_cache) -> None:
         from brain.tools.registry import ToolRegistry
         from brain.tools.scene_tools import register_scene_tools
         from brain.turn import TurnManager
-        from brain.settings import SceneSettings
         from pathlib import Path
 
         MODEL_PATH = Path("models/Qwen3.5-4B-Q4_K_M.gguf")
@@ -257,7 +256,11 @@ def run_brain_voice(scene_cache) -> None:
         # the main thread.
         print(">>> Qwen model will load on first request (GPU, ~10-20s first turn)...", flush=True)
 
-        prompt_builder = PromptBuilder(scene_cache, SceneSettings())
+        prompt_builder = PromptBuilder(
+            scene_cache,
+            max_turns=llm_settings.history_turns,
+            max_total_tokens=llm_settings.history_max_tokens,
+        )
         tools = ToolRegistry()
         register_scene_tools(tools, scene_cache)
 

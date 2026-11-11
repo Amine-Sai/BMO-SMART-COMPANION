@@ -1,5 +1,8 @@
 from brain.llm import count_tokens
 from brain.scene import SceneCache
+from brain.settings import LLMSettings
+
+_LLM_DEFAULTS = LLMSettings()
 
 BMO_SYSTEM_PROMPT = (
     "You are BMO, a warm and curious robot friend. "
@@ -16,7 +19,11 @@ def _count_message_tokens(messages: list[dict[str, str]]) -> int:
 
 
 class RollingHistory:
-    def __init__(self, max_turns: int = 6, max_total_tokens: int = 900) -> None:
+    def __init__(
+        self,
+        max_turns: int = _LLM_DEFAULTS.history_turns,
+        max_total_tokens: int = _LLM_DEFAULTS.history_max_tokens,
+    ) -> None:
         self.max_turns = max_turns
         self.max_total_tokens = max_total_tokens
         self._messages: list[dict[str, str]] = []
@@ -46,8 +53,8 @@ class PromptBuilder:
         self,
         scene_cache: SceneCache,
         system_prompt: str = BMO_SYSTEM_PROMPT,
-        max_turns: int = 6,
-        max_total_tokens: int = 900,
+        max_turns: int = _LLM_DEFAULTS.history_turns,
+        max_total_tokens: int = _LLM_DEFAULTS.history_max_tokens,
     ) -> None:
         self.scene_cache = scene_cache
         self.system_prompt = system_prompt
