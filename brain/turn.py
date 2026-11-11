@@ -56,7 +56,9 @@ class TurnManager:
         self._clock = clock
         self.cancel_event = threading.Event()
         self._active_thread: threading.Thread | None = None
-        self._turn_lock = threading.Lock()
+        # Single-flight gate: held for the whole turn body, so at most one
+        # LLM decode/TTS turn runs at a time. Contenders are dropped, not queued.
+        self._turn_gate = threading.Lock()
 
     def process_audio_frame(self, frame: np.ndarray, source: AudioSource | None = None) -> str | None:
         if self._state_machine.state == BrainState.SPEAKING:
@@ -138,25 +140,51 @@ class TurnManager:
             stt_ms=stt_res.latency_ms,
         )
 
+    def _begin_turn(self) -> bool:
+        """Claim the single-flight turn gate and reset per-turn state.
+
+        Returns False (after logging) when another turn already holds the gate.
+        """
+        if not self._turn_gate.acquire(blocking=False):
+            logger.info("turn busy, dropping")
+            return False
+        try:
+            self.cancel_event.clear()
+            self._state_machine.transition(BrainState.THINKING)
+        except BaseException:
+            self._turn_gate.release()
+            raise
+        return True
+
+    def _end_turn(self) -> None:
+        self._turn_gate.release()
+
+    def _text_turn_worker(self, text: str) -> None:
+        try:
+            self._run_turn(text)
+        finally:
+            self._end_turn()
+
     def start_text_turn(self, text: str) -> str | None:
         """Start a text-only turn on a new thread (for proactive handlers).
 
-        Waits for any existing turn to finish before starting a new one, so
-        llama-cpp inference is never invoked concurrently (it is not thread-safe).
+        Returns immediately; if a turn is already in flight the request is
+        dropped rather than blocking the caller.
         """
-        self.cancel_event.clear()
-        if (
-            self._active_thread is not None
-            and self._active_thread.is_alive()
-            and self._active_thread is not threading.current_thread()
-        ):
-            self._active_thread.join(timeout=120.0)
-        self._active_thread = threading.Thread(
-            target=self.run_text_turn,
+        if not self._begin_turn():
+            return None
+        thread = threading.Thread(
+            target=self._text_turn_worker,
             args=(text,),
             daemon=True,
         )
-        self._active_thread.start()
+        self._active_thread = thread
+        try:
+            thread.start()
+        except BaseException:
+            self._active_thread = None
+            self._end_turn()
+            raise
         return None
 
     def run_text_turn(
@@ -167,8 +195,26 @@ class TurnManager:
         vad_end_ts: float | None = None,
         stt_ms: float = 0.0,
     ) -> str:
-        self.cancel_event.clear()
-        self._state_machine.transition(BrainState.THINKING)
+        if not self._begin_turn():
+            return ""
+        try:
+            return self._run_turn(
+                user_text,
+                confirmed=confirmed,
+                vad_end_ts=vad_end_ts,
+                stt_ms=stt_ms,
+            )
+        finally:
+            self._end_turn()
+
+    def _run_turn(
+        self,
+        user_text: str,
+        *,
+        confirmed: bool = False,
+        vad_end_ts: float | None = None,
+        stt_ms: float = 0.0,
+    ) -> str:
         messages = self._prompt_builder.build_messages(user_text)
 
         t_turn_start = self._clock()
@@ -221,41 +267,36 @@ class TurnManager:
                     )
                 self._tts.speak_sentence(clean, self._sink, cancel_event=self.cancel_event)
 
-        # llama-cpp is not thread-safe — serialize all inference through one lock
-        t_lock0 = self._clock()
-        logger.info("Waiting for turn lock...")
+        # The single-flight gate guarantees only one llama-cpp decode at a time.
+        t_chat0 = self._clock()
         try:
-            with self._turn_lock:
-                t_lock1 = self._clock()
-                logger.info("Acquired turn lock (waited %.1fs), starting LLM chat...", t_lock1 - t_lock0)
-                t_chat0 = self._clock()
-                for chunk in self._llm.chat(
-                    messages,
-                    tools=self._tools.ollama_tools(),
-                    stream=True,
-                    cancel_event=self.cancel_event,
-                ):
-                    if self.cancel_event.is_set():
-                        break
-                    if not first_chunk_seen:
-                        first_chunk_seen = True
-                        llm_ttft_ms = (self._clock() - t_llm_start) * 1000.0
-                        logger.info("First LLM token after %.1fs", llm_ttft_ms)
+            for chunk in self._llm.chat(
+                messages,
+                tools=self._tools.ollama_tools(),
+                stream=True,
+                cancel_event=self.cancel_event,
+            ):
+                if self.cancel_event.is_set():
+                    break
+                if not first_chunk_seen:
+                    first_chunk_seen = True
+                    llm_ttft_ms = (self._clock() - t_llm_start) * 1000.0
+                    logger.info("First LLM token after %.1fs", llm_ttft_ms)
 
-                    if chunk.tool_call is not None:
-                        self._tools.dispatch(chunk.tool_call, confirmed=confirmed)
+                if chunk.tool_call is not None:
+                    self._tools.dispatch(chunk.tool_call, confirmed=confirmed)
 
-                    if chunk.text:
-                        reply_chunks.append(chunk.text)
-                        fed = splitter.feed(chunk.text)
-                        if fed is not None:
-                            sentences = [fed] if isinstance(fed, str) else list(fed)
-                            for s in sentences:
-                                _speak_sentence(s)
-                                if self.cancel_event.is_set():
-                                    break
-                t_chat1 = self._clock()
-                logger.info("LLM chat completed in %.1fs, %d chunks", t_chat1 - t_chat0, len(reply_chunks))
+                if chunk.text:
+                    reply_chunks.append(chunk.text)
+                    fed = splitter.feed(chunk.text)
+                    if fed is not None:
+                        sentences = [fed] if isinstance(fed, str) else list(fed)
+                        for s in sentences:
+                            _speak_sentence(s)
+                            if self.cancel_event.is_set():
+                                break
+            t_chat1 = self._clock()
+            logger.info("LLM chat completed in %.1fs, %d chunks", t_chat1 - t_chat0, len(reply_chunks))
         except Exception as exc:
             logger.error("LLM chat failed: %s", exc, exc_info=True)
             reply_chunks.append(f"[LLM error: {exc}]")
