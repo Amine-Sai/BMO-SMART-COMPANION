@@ -56,6 +56,7 @@ class TurnManager:
         self._clock = clock
         self.cancel_event = threading.Event()
         self._active_thread: threading.Thread | None = None
+        self._turn_lock = threading.Lock()
 
     def process_audio_frame(self, frame: np.ndarray, source: AudioSource | None = None) -> str | None:
         if self._state_machine.state == BrainState.SPEAKING:
@@ -138,10 +139,10 @@ class TurnManager:
         )
 
     def start_text_turn(self, text: str) -> str | None:
-        """Start a text-only turn on the active thread (for proactive handlers).
-        
-        Clears cancel_event, joins existing _active_thread if alive, and starts
-        a new thread running run_text_turn. Returns immediately.
+        """Start a text-only turn on a new thread (for proactive handlers).
+
+        Waits for any existing turn to finish before starting a new one, so
+        llama-cpp inference is never invoked concurrently (it is not thread-safe).
         """
         self.cancel_event.clear()
         if (
@@ -149,7 +150,7 @@ class TurnManager:
             and self._active_thread.is_alive()
             and self._active_thread is not threading.current_thread()
         ):
-            self._active_thread.join(timeout=0.25)
+            self._active_thread.join(timeout=120.0)
         self._active_thread = threading.Thread(
             target=self.run_text_turn,
             args=(text,),
@@ -220,31 +221,33 @@ class TurnManager:
                     )
                 self._tts.speak_sentence(clean, self._sink, cancel_event=self.cancel_event)
 
+        # llama-cpp is not thread-safe — serialize all inference through one lock
         try:
-            for chunk in self._llm.chat(
-                messages,
-                tools=self._tools.ollama_tools(),
-                stream=True,
-                cancel_event=self.cancel_event,
-            ):
-                if self.cancel_event.is_set():
-                    break
-                if not first_chunk_seen:
-                    first_chunk_seen = True
-                    llm_ttft_ms = (self._clock() - t_llm_start) * 1000.0
+            with self._turn_lock:
+                for chunk in self._llm.chat(
+                    messages,
+                    tools=self._tools.ollama_tools(),
+                    stream=True,
+                    cancel_event=self.cancel_event,
+                ):
+                    if self.cancel_event.is_set():
+                        break
+                    if not first_chunk_seen:
+                        first_chunk_seen = True
+                        llm_ttft_ms = (self._clock() - t_llm_start) * 1000.0
 
-                if chunk.tool_call is not None:
-                    self._tools.dispatch(chunk.tool_call, confirmed=confirmed)
+                    if chunk.tool_call is not None:
+                        self._tools.dispatch(chunk.tool_call, confirmed=confirmed)
 
-                if chunk.text:
-                    reply_chunks.append(chunk.text)
-                    fed = splitter.feed(chunk.text)
-                    if fed is not None:
-                        sentences = [fed] if isinstance(fed, str) else list(fed)
-                        for s in sentences:
-                            _speak_sentence(s)
-                            if self.cancel_event.is_set():
-                                break
+                    if chunk.text:
+                        reply_chunks.append(chunk.text)
+                        fed = splitter.feed(chunk.text)
+                        if fed is not None:
+                            sentences = [fed] if isinstance(fed, str) else list(fed)
+                            for s in sentences:
+                                _speak_sentence(s)
+                                if self.cancel_event.is_set():
+                                    break
         except Exception as exc:
             logger.error("LLM chat failed: %s", exc, exc_info=True)
             reply_chunks.append(f"[LLM error: {exc}]")
