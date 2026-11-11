@@ -252,9 +252,10 @@ def run_brain_voice(scene_cache) -> None:
             use_mlock=False,
         )
         llm = LoggingLLMClient(LLMClient(llm_settings))
-        print(">>> Loading Qwen model into GPU memory (first load may take 10-20s)...", flush=True)
-        llm.prewarm()
-        print(">>> Qwen model ready on GPU.", flush=True)
+        # Model loads lazily on first chat() call (in the worker thread),
+        # avoiding CUDA context thread-affinity issues from pre-warming on
+        # the main thread.
+        print(">>> Qwen model will load on first request (GPU, ~10-20s first turn)...", flush=True)
 
         prompt_builder = PromptBuilder(scene_cache, SceneSettings())
         tools = ToolRegistry()

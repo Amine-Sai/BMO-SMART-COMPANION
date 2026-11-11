@@ -222,8 +222,13 @@ class TurnManager:
                 self._tts.speak_sentence(clean, self._sink, cancel_event=self.cancel_event)
 
         # llama-cpp is not thread-safe — serialize all inference through one lock
+        t_lock0 = self._clock()
+        logger.info("Waiting for turn lock...")
         try:
             with self._turn_lock:
+                t_lock1 = self._clock()
+                logger.info("Acquired turn lock (waited %.1fs), starting LLM chat...", t_lock1 - t_lock0)
+                t_chat0 = self._clock()
                 for chunk in self._llm.chat(
                     messages,
                     tools=self._tools.ollama_tools(),
@@ -235,6 +240,7 @@ class TurnManager:
                     if not first_chunk_seen:
                         first_chunk_seen = True
                         llm_ttft_ms = (self._clock() - t_llm_start) * 1000.0
+                        logger.info("First LLM token after %.1fs", llm_ttft_ms)
 
                     if chunk.tool_call is not None:
                         self._tools.dispatch(chunk.tool_call, confirmed=confirmed)
@@ -248,6 +254,8 @@ class TurnManager:
                                 _speak_sentence(s)
                                 if self.cancel_event.is_set():
                                     break
+                t_chat1 = self._clock()
+                logger.info("LLM chat completed in %.1fs, %d chunks", t_chat1 - t_chat0, len(reply_chunks))
         except Exception as exc:
             logger.error("LLM chat failed: %s", exc, exc_info=True)
             reply_chunks.append(f"[LLM error: {exc}]")
