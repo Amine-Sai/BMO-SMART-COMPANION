@@ -242,15 +242,16 @@ def run_brain_voice(scene_cache: SceneCache) -> None:
         tts = TextToSpeech(AUDIO_SETTINGS, model_path=PIPER_VOICE_PATH)
 
         # Tune llama-cpp for responsive local inference on CPU
+        # n_gpu_layers=0 (CPU only), flash_attn disabled (CPU build doesn't support it)
         llm_settings = LLMSettings(
             backend="llamacpp",
             host=str(MODEL_PATH.absolute()),
             model="Qwen3.5-4B-Q4_K_M",
             num_ctx=2048,
             temperature=0.7,
-            n_gpu_layers=-1,
+            n_gpu_layers=0,
             n_threads=4,
-            use_flash_attn=True,
+            use_flash_attn=False,
             use_mmap=True,
             use_mlock=False,
         )
