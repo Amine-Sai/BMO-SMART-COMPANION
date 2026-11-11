@@ -2,7 +2,8 @@
 """
 BMO Full System - Coordinated Startup
 Runs: MQTT Broker -> CV Pipeline -> Brain Voice Assistant
-All components communicate via MQTT on localhost:1883
+CV writes scene to data/cv_scene.json; brain reads it via file polling.
+CLI is used only for text input to the LLM.
 """
 
 import logging
@@ -11,16 +12,13 @@ import threading
 import time
 import signal
 import sys
-import socket
+import json
 from pathlib import Path
-
-import paho.mqtt.client as mqtt
-
-from bmo_contracts.models import Scene, VisionStatus
-from bmo_contracts.topics import VISION_CONTEXT, VISION_STATUS
 
 warnings.filterwarnings("ignore", category=FutureWarning, module="torch")
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="sounddevice")
+
+from bmo_contracts.models import Scene
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,84 +34,88 @@ _brain_thread = None
 _text_thread = None
 _shutdown = threading.Event()
 
+# Intermediate file for CV -> brain scene communication
+SCENE_FILE = Path("data/cv_scene.json")
+
 
 def start_mqtt_broker():
-    """Use the externally running mosquitto broker on 127.0.0.1:1883.
+    """Verify mosquitto is reachable on 127.0.0.1:1883.
 
-    Mosquitto is started separately by the operator; this function only
-    verifies the port is reachable so the CV and brain components can
-    connect to it. Returns None (no subprocess to manage).
+    CV and brain no longer use MQTT for scene communication (file-based
+    instead), but the broker is still used by CV's MQTT bridge. Returns None.
     """
     global _broker_proc
     _broker_proc = None
+    import socket
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         s.settimeout(2.0)
         s.connect(("127.0.0.1", 1883))
         logger.info("MQTT broker (mosquitto) reachable on 127.0.0.1:1883")
     except OSError as exc:
-        logger.warning("MQTT broker not reachable on 127.0.0.1:1883: %s — CV/brain MQTT will fail", exc)
+        logger.warning("MQTT broker not reachable on 127.0.0.1:1883: %s", exc)
     finally:
         s.close()
     return None
 
 
 def stop_mqtt_broker():
-    """No-op: mosquitto is managed externally, not by this script."""
+    """No-op: mosquitto is managed externally."""
     pass
 
 
 # ---------------------------------------------------------------------------
-# MQTT scene subscriber: CV -> brain scene cache
+# File-based scene reader: CV -> brain scene cache
 # ---------------------------------------------------------------------------
-_scene_sub_client: mqtt.Client | None = None
+_scene_file_mtime: float | None = None
 
 
-def start_scene_subscriber(scene_cache) -> None:
-    """Connect to mosquitto, subscribe to VISION_CONTEXT, and update scene_cache."""
-    global _scene_sub_client
+def read_scene_file() -> dict | None:
+    """Read the latest scene contract written by the CV pipeline.
 
-    def on_connect(client, userdata, flags, rc, properties=None):
-        if rc == 0:
-            client.subscribe(VISION_CONTEXT, qos=0)
-            client.subscribe(VISION_STATUS, qos=1)
-            logger.info("Subscribed to MQTT topics %s, %s", VISION_CONTEXT, VISION_STATUS)
-        else:
-            logger.warning("MQTT scene subscriber connect failed: rc=%s", rc)
-
-    def on_message(client, userdata, msg: mqtt.MQTTMessage) -> None:
-        try:
-            if msg.topic == VISION_CONTEXT:
-                scene = Scene.model_validate_json(msg.payload)
-                scene_cache.update_scene(scene)
-                people = [(p.name, p.track_id) for p in (scene.people or [])]
-                logger.info("Scene update from CV: people=%s", people)
-            elif msg.topic == VISION_STATUS:
-                scene_cache.update_status(msg.payload)
-                logger.info("Vision status update from CV")
-        except Exception as exc:
-            logger.warning("Invalid payload on %s: %s", msg.topic, exc)
-
-    client = mqtt.Client()
-    client.on_connect = on_connect
-    client.on_message = on_message
+    Returns None if the file doesn't exist or can't be parsed.
+    """
     try:
-        client.connect("127.0.0.1", 1883, keepalive=30)
-        client.loop_start()
-        _scene_sub_client = client
-    except Exception as exc:
-        logger.warning("Could not start MQTT scene subscriber: %s", exc)
+        if not SCENE_FILE.is_file():
+            return None
+        data = json.loads(SCENE_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
 
 
-def stop_scene_subscriber() -> None:
-    global _scene_sub_client
-    if _scene_sub_client is not None:
-        try:
-            _scene_sub_client.loop_stop()
-            _scene_sub_client.disconnect()
-        except Exception:
-            pass
-        _scene_sub_client = None
+def start_scene_file_reader(scene_cache) -> None:
+    """Poll the intermediate scene file and update scene_cache on change.
+
+    Runs in a daemon thread.
+    """
+    global _scene_file_mtime
+
+    def poll():
+        global _scene_file_mtime
+        while not _shutdown.is_set():
+            try:
+                if SCENE_FILE.is_file():
+                    mtime = SCENE_FILE.stat().st_mtime
+                    if _scene_file_mtime is None or mtime > _scene_file_mtime:
+                        data = read_scene_file()
+                        if data is not None:
+                            scene = Scene.model_validate(data)
+                            scene_cache.update_scene(scene)
+                            people = [(p.name, p.track_id) for p in (scene.people or [])]
+                            logger.info("Scene update from CV file: people=%s", people)
+                            _scene_file_mtime = mtime
+            except Exception:
+                pass
+            time.sleep(0.5)
+
+    t = threading.Thread(target=poll, daemon=True, name="Scene-File-Reader")
+    t.start()
+
+
+def stop_scene_file_reader() -> None:
+    """No-op: reader thread stops when _shutdown is set."""
+    pass
 
 
 def run_cv_pipeline():
@@ -372,13 +374,13 @@ def main():
     # 1. Verify MQTT broker (mosquitto) is reachable
     start_mqtt_broker()
 
-    # Shared scene cache: CV writes via MQTT subscriber, brain reads for LLM context
+    # Shared scene cache: CV writes via intermediate file, brain reads for LLM context
     from brain.settings import SceneSettings
     from brain.scene import SceneCache
     scene_cache = SceneCache(SceneSettings())
 
-    # Start MQTT scene subscriber (CV -> brain scene cache)
-    start_scene_subscriber(scene_cache)
+    # Start file-based scene reader (CV file -> brain scene cache)
+    start_scene_file_reader(scene_cache)
 
     # 2. Start CV Pipeline (in background thread)
     global _cv_thread
@@ -386,7 +388,7 @@ def main():
     _cv_thread.start()
     logger.info("CV pipeline thread started")
 
-    # Give CV time to connect to broker
+    # Give CV time to connect to broker and start writing scenes
     time.sleep(3)
 
     # 3. Start Brain Voice Assistant (main thread)
@@ -405,7 +407,7 @@ def main():
     finally:
         logger.info("Shutting down...")
         _shutdown.set()
-        stop_scene_subscriber()
+        stop_scene_file_reader()
         stop_mqtt_broker()
         logger.info("Shutdown complete")
 
