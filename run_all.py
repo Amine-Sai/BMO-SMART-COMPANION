@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 _broker_proc = None
 _cv_thread = None
 _brain_thread = None
+_text_thread = None
 _shutdown = threading.Event()
 
 
@@ -276,6 +277,13 @@ def run_brain_voice(scene_cache: SceneCache) -> None:
         # Create persistent audio source to avoid ALSA stream conflicts
         source = SoundDeviceSource(AUDIO_SETTINGS.sample_rate)
 
+        # Start text input thread (typed messages share the same LLM->TTS pipeline)
+        global _text_thread
+        _text_thread = threading.Thread(
+            target=run_text_input, args=(turn_manager,), daemon=True, name="Text-Input"
+        )
+        _text_thread.start()
+
         while not _shutdown.is_set():
             print("\n[WAITING FOR WAKE WORD...]", flush=True)
 
@@ -309,6 +317,41 @@ def run_brain_voice(scene_cache: SceneCache) -> None:
         logger.error("Brain voice error: %s", e, exc_info=True)
     finally:
         logger.info("Brain voice assistant stopped")
+
+
+def run_text_input(turn_manager: "TurnManager") -> None:
+    """Read typed lines from stdin and feed them into the same turn pipeline.
+
+    Reuses TurnManager.start_text_turn -> run_text_turn, so typed text goes
+    through LLM -> TTS -> speaker exactly like voice input. Runs until
+    _shutdown is set or the user types 'quit'/'exit'.
+    """
+    logger.info("Text input thread started. Type messages and press Enter.")
+    print("\n[TYPING MODE] Type a message and press Enter to talk to BMO. "
+          "Type 'quit' or 'exit' to stop. Wake-word voice input still works.\n", flush=True)
+
+    while not _shutdown.is_set():
+        try:
+            line = input("> ")
+        except (EOFError, KeyboardInterrupt):
+            break
+
+        text = line.strip()
+        if not text:
+            continue
+        if text.lower() in ("quit", "exit", "q"):
+            logger.info("Text input requested shutdown")
+            _shutdown.set()
+            break
+
+        # Feed typed text into the same pipeline as voice input.
+        # start_text_turn handles joining any existing _active_thread.
+        try:
+            turn_manager.start_text_turn(text)
+        except Exception as exc:
+            logger.error("Text input turn failed: %s", exc)
+
+    logger.info("Text input thread stopped")
 
 
 def signal_handler(signum, frame):
