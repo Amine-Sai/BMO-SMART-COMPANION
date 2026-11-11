@@ -238,23 +238,23 @@ def run_brain_voice(scene_cache) -> None:
         stt = SpeechToText(AUDIO_SETTINGS)
         tts = TextToSpeech(AUDIO_SETTINGS, model_path=PIPER_VOICE_PATH)
 
-        # llama-cpp tuned for CPU-only (no GPU, no flash attention)
+        # llama-cpp tuned for GPU (offload all layers, enable flash attention)
         llm_settings = LLMSettings(
             backend="llamacpp",
             host=str(MODEL_PATH.absolute()),
             model="Qwen3.5-4B-Q4_K_M",
-            num_ctx=512,
+            num_ctx=2048,
             temperature=0.7,
-            n_gpu_layers=0,
+            n_gpu_layers=-1,
             n_threads=4,
-            use_flash_attn=False,
+            use_flash_attn=True,
             use_mmap=True,
             use_mlock=False,
         )
         llm = LoggingLLMClient(LLMClient(llm_settings))
-        print(">>> Loading Qwen model into memory (first load may take 30-60s on CPU)...", flush=True)
+        print(">>> Loading Qwen model into GPU memory (first load may take 10-20s)...", flush=True)
         llm.prewarm()
-        print(">>> Qwen model ready.", flush=True)
+        print(">>> Qwen model ready on GPU.", flush=True)
 
         prompt_builder = PromptBuilder(scene_cache, SceneSettings())
         tools = ToolRegistry()
