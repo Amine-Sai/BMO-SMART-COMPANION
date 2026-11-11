@@ -1060,12 +1060,6 @@ def run_pipeline(
                 )
                 if scene_sig != last_scene_sig and (now_sec - last_scene_pub_time >= 1.0):
                     mqtt_bridge.publish_scene(scene_contract)
-                    # Write scene to intermediate file for brain consumption
-                    try:
-                        scene_file = DATA_DIR / "cv_scene.json"
-                        scene_file.write_text(json.dumps(scene_contract, indent=2))
-                    except Exception:
-                        pass
                     last_scene_sig = scene_sig
                     last_scene_pub_time = now_sec
 

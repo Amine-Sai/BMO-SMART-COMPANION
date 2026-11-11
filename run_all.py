@@ -2,7 +2,7 @@
 """
 BMO Full System - Coordinated Startup
 Runs: MQTT Broker -> CV Pipeline -> Brain Voice Assistant
-CV writes scene to data/cv_scene.json; brain reads it via file polling.
+CV publishes Scene via MQTT; brain subscribes and takes the most recent frame.
 CLI is used only for text input to the LLM.
 """
 
@@ -12,13 +12,16 @@ import threading
 import time
 import signal
 import sys
-import json
+import socket
 from pathlib import Path
+
+import paho.mqtt.client as mqtt
+
+from bmo_contracts.models import Scene, VisionStatus
+from bmo_contracts.topics import VISION_CONTEXT, VISION_STATUS
 
 warnings.filterwarnings("ignore", category=FutureWarning, module="torch")
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="sounddevice")
-
-from bmo_contracts.models import Scene
 
 logging.basicConfig(
     level=logging.INFO,
@@ -32,21 +35,17 @@ _broker_proc = None
 _cv_thread = None
 _brain_thread = None
 _text_thread = None
+_scene_sub_client = None
 _shutdown = threading.Event()
-
-# Intermediate file for CV -> brain scene communication
-SCENE_FILE = Path("data/cv_scene.json")
 
 
 def start_mqtt_broker():
     """Verify mosquitto is reachable on 127.0.0.1:1883.
 
-    CV and brain no longer use MQTT for scene communication (file-based
-    instead), but the broker is still used by CV's MQTT bridge. Returns None.
+    Returns None (no subprocess to manage; mosquitto is started externally).
     """
     global _broker_proc
     _broker_proc = None
-    import socket
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         s.settimeout(2.0)
@@ -65,57 +64,55 @@ def stop_mqtt_broker():
 
 
 # ---------------------------------------------------------------------------
-# File-based scene reader: CV -> brain scene cache
+# MQTT scene subscriber: CV -> brain scene cache (most recent frame only)
 # ---------------------------------------------------------------------------
-_scene_file_mtime: float | None = None
-
-
-def read_scene_file() -> dict | None:
-    """Read the latest scene contract written by the CV pipeline.
-
-    Returns None if the file doesn't exist or can't be parsed.
+def start_scene_subscriber(scene_cache) -> None:
+    """Connect to mosquitto, subscribe to VISION_CONTEXT + VISION_STATUS,
+    and update scene_cache with only the most recent scene.
     """
+    global _scene_sub_client
+
+    def on_connect(client, userdata, flags, rc, properties=None):
+        if rc == 0:
+            client.subscribe(VISION_CONTEXT, qos=0)
+            client.subscribe(VISION_STATUS, qos=1)
+            logger.info("Subscribed to MQTT topics %s, %s", VISION_CONTEXT, VISION_STATUS)
+        else:
+            logger.warning("MQTT scene subscriber connect failed: rc=%s", rc)
+
+    def on_message(client, userdata, msg: mqtt.MQTTMessage) -> None:
+        try:
+            if msg.topic == VISION_CONTEXT:
+                scene = Scene.model_validate_json(msg.payload)
+                scene_cache.update_scene(scene)
+                people = [(p.name, p.track_id) for p in (scene.people or [])]
+                logger.info("Scene update from CV: people=%s", people)
+            elif msg.topic == VISION_STATUS:
+                scene_cache.update_status(msg.payload)
+                logger.info("Vision status update from CV")
+        except Exception as exc:
+            logger.warning("Invalid payload on %s: %s", msg.topic, exc)
+
+    client = mqtt.Client()
+    client.on_connect = on_connect
+    client.on_message = on_message
     try:
-        if not SCENE_FILE.is_file():
-            return None
-        data = json.loads(SCENE_FILE.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else None
-    except Exception:
-        return None
+        client.connect("127.0.0.1", 1883, keepalive=30)
+        client.loop_start()
+        _scene_sub_client = client
+    except Exception as exc:
+        logger.warning("Could not start MQTT scene subscriber: %s", exc)
 
 
-def start_scene_file_reader(scene_cache) -> None:
-    """Poll the intermediate scene file and update scene_cache on change.
-
-    Runs in a daemon thread.
-    """
-    global _scene_file_mtime
-
-    def poll():
-        global _scene_file_mtime
-        while not _shutdown.is_set():
-            try:
-                if SCENE_FILE.is_file():
-                    mtime = SCENE_FILE.stat().st_mtime
-                    if _scene_file_mtime is None or mtime > _scene_file_mtime:
-                        data = read_scene_file()
-                        if data is not None:
-                            scene = Scene.model_validate(data)
-                            scene_cache.update_scene(scene)
-                            people = [(p.name, p.track_id) for p in (scene.people or [])]
-                            logger.info("Scene update from CV file: people=%s", people)
-                            _scene_file_mtime = mtime
-            except Exception:
-                pass
-            time.sleep(0.5)
-
-    t = threading.Thread(target=poll, daemon=True, name="Scene-File-Reader")
-    t.start()
-
-
-def stop_scene_file_reader() -> None:
-    """No-op: reader thread stops when _shutdown is set."""
-    pass
+def stop_scene_subscriber() -> None:
+    global _scene_sub_client
+    if _scene_sub_client is not None:
+        try:
+            _scene_sub_client.loop_stop()
+            _scene_sub_client.disconnect()
+        except Exception:
+            pass
+        _scene_sub_client = None
 
 
 def run_cv_pipeline():
@@ -123,31 +120,27 @@ def run_cv_pipeline():
     import os
     import sys
     from contextlib import redirect_stdout, redirect_stderr
-    
-    # Create log directory
+
     log_dir = Path(__file__).parent / "logs"
     log_dir.mkdir(exist_ok=True)
     cv_log_path = log_dir / "cv_pipeline.log"
-    
+
     logger.info("Starting CV pipeline (output -> %s)", cv_log_path)
-    
-    # Redirect stdout/stderr BEFORE importing CV module
+
     with open(cv_log_path, "a") as log_file:
         with redirect_stdout(log_file), redirect_stderr(log_file):
             try:
                 from assistant_cv.main import run_pipeline
-                
-                # Suppress console logging for CV modules
+
                 cv_logger = logging.getLogger("assistant_cv")
                 cv_logger.setLevel(logging.WARNING)
                 cv_logger.propagate = False
-                
-                # Also suppress ultralytics, cv2, etc.
+
                 for name in ["ultralytics", "cv2", "torch", "PIL"]:
                     l = logging.getLogger(name)
                     l.setLevel(logging.WARNING)
                     l.propagate = False
-                
+
                 run_pipeline(
                     cam_index=0,
                     headless=True,
@@ -162,11 +155,10 @@ def run_cv_pipeline():
                 logger.info("CV pipeline stopped")
 
 
-def run_brain_voice(scene_cache: SceneCache) -> None:
+def run_brain_voice(scene_cache) -> None:
     """Run the brain voice assistant in a thread."""
     logger.info("Starting Brain voice assistant...")
     try:
-        # Import here to avoid early initialization
         from brain.audio.io import AudioSettings, SoundDeviceSource, SoundDeviceSink
         from brain.audio.wake import WakeWordDetector
         from brain.audio.vad import VoiceActivityDetector
@@ -210,6 +202,7 @@ def run_brain_voice(scene_cache: SceneCache) -> None:
             def __init__(self, inner):
                 self._inner = inner
                 self._buffer = []
+
             def chat(self, messages, **kwargs):
                 self._buffer = []
                 print("\n>>> BMO thinking...", flush=True)
@@ -221,8 +214,12 @@ def run_brain_voice(scene_cache: SceneCache) -> None:
                 if self._buffer:
                     full = "".join(self._buffer).strip()
                     print(f"\n>>> BMO response: {full}\n", flush=True)
-            def unload(self): self._inner.unload()
-            def prewarm(self): self._inner.prewarm()
+
+            def unload(self):
+                self._inner.unload()
+
+            def prewarm(self):
+                self._inner.prewarm()
 
         print("=" * 60)
         print("  BMO VOICE ASSISTANT - Connected to CV via MQTT")
@@ -241,13 +238,12 @@ def run_brain_voice(scene_cache: SceneCache) -> None:
         stt = SpeechToText(AUDIO_SETTINGS)
         tts = TextToSpeech(AUDIO_SETTINGS, model_path=PIPER_VOICE_PATH)
 
-        # Tune llama-cpp for responsive local inference on CPU
-        # n_gpu_layers=0 (CPU only), flash_attn disabled (CPU build doesn't support it)
+        # llama-cpp tuned for CPU-only (no GPU, no flash attention)
         llm_settings = LLMSettings(
             backend="llamacpp",
             host=str(MODEL_PATH.absolute()),
             model="Qwen3.5-4B-Q4_K_M",
-            num_ctx=2048,
+            num_ctx=512,
             temperature=0.7,
             n_gpu_layers=0,
             n_threads=4,
@@ -279,7 +275,6 @@ def run_brain_voice(scene_cache: SceneCache) -> None:
             publish_fn=lambda t, p, q, r: None,
         )
 
-        # Create persistent audio source to avoid ALSA stream conflicts
         source = SoundDeviceSource(AUDIO_SETTINGS.sample_rate)
 
         # Start text input thread (typed messages share the same LLM->TTS pipeline)
@@ -308,7 +303,6 @@ def run_brain_voice(scene_cache: SceneCache) -> None:
 
             print("[READY FOR NEXT]", flush=True)
 
-        # Ensure any running turn completes before closing audio
         if turn_manager._active_thread and turn_manager._active_thread.is_alive():
             print("[WAITING FOR TURN TO COMPLETE...]", flush=True)
             turn_manager._active_thread.join(timeout=30.0)
@@ -324,7 +318,7 @@ def run_brain_voice(scene_cache: SceneCache) -> None:
         logger.info("Brain voice assistant stopped")
 
 
-def run_text_input(turn_manager: "TurnManager") -> None:
+def run_text_input(turn_manager) -> None:
     """Read typed lines from stdin and feed them into the same turn pipeline.
 
     Reuses TurnManager.start_text_turn -> run_text_turn, so typed text goes
@@ -349,8 +343,6 @@ def run_text_input(turn_manager: "TurnManager") -> None:
             _shutdown.set()
             break
 
-        # Feed typed text into the same pipeline as voice input.
-        # start_text_turn handles joining any existing _active_thread.
         print(f">>> Sending to BMO: {text}", flush=True)
         try:
             turn_manager.start_text_turn(text)
@@ -378,13 +370,13 @@ def main():
     # 1. Verify MQTT broker (mosquitto) is reachable
     start_mqtt_broker()
 
-    # Shared scene cache: CV writes via intermediate file, brain reads for LLM context
+    # Shared scene cache: CV writes via MQTT subscriber, brain reads for LLM context
     from brain.settings import SceneSettings
     from brain.scene import SceneCache
     scene_cache = SceneCache(SceneSettings())
 
-    # Start file-based scene reader (CV file -> brain scene cache)
-    start_scene_file_reader(scene_cache)
+    # Start MQTT scene subscriber (CV -> brain scene cache, most recent frame only)
+    start_scene_subscriber(scene_cache)
 
     # 2. Start CV Pipeline (in background thread)
     global _cv_thread
@@ -392,7 +384,7 @@ def main():
     _cv_thread.start()
     logger.info("CV pipeline thread started")
 
-    # Give CV time to connect to broker and start writing scenes
+    # Give CV time to connect to broker
     time.sleep(3)
 
     # 3. Start Brain Voice Assistant (main thread)
@@ -403,7 +395,6 @@ def main():
     _brain_thread.start()
 
     try:
-        # Keep main thread alive
         while not _shutdown.is_set():
             time.sleep(1)
     except KeyboardInterrupt:
@@ -411,7 +402,7 @@ def main():
     finally:
         logger.info("Shutting down...")
         _shutdown.set()
-        stop_scene_file_reader()
+        stop_scene_subscriber()
         stop_mqtt_broker()
         logger.info("Shutdown complete")
 
