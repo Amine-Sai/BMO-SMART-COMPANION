@@ -274,6 +274,8 @@ def run_text_input(turn_manager) -> None:
     For text mode, print LLM chunks immediately (streaming) without waiting for TTS.
     Runs until _shutdown is set or the user types 'quit'/'exit'.
     """
+    import sys
+    stdout = sys.stdout
     while not _shutdown.is_set():
         try:
             line = input("> ")
@@ -291,6 +293,7 @@ def run_text_input(turn_manager) -> None:
         try:
             # Stream LLM response immediately for text mode
             print("bmo: ", end="", flush=True)
+            stdout.flush()
             full_reply = []
             for chunk in turn_manager._llm.chat(
                 turn_manager._prompt_builder.build_messages(text),
@@ -300,8 +303,10 @@ def run_text_input(turn_manager) -> None:
             ):
                 if chunk.text:
                     print(chunk.text, end="", flush=True)
+                    stdout.flush()
                     full_reply.append(chunk.text)
             print(flush=True)
+            stdout.flush()
             # Record turn in history
             turn_manager._prompt_builder.record_turn(text, "".join(full_reply))
         except Exception as exc:
