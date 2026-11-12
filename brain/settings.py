@@ -23,7 +23,7 @@ class LLMSettings(BaseModel):
     history_turns: int = 3
     history_max_tokens: int = 250
     # llamacpp optimization settings
-    n_gpu_layers: int = -1  # -1 = all layers on GPU (if available), 0 = CPU only
+    n_gpu_layers: int = 20  # 20/32 layers on GPU (fits 6GB VRAM); -1 = all layers, 0 = CPU only
     n_threads: int = 8
     use_flash_attn: bool = False  # disabled on Turing (sm_75); CUDA graph capture unsupported
     use_mmap: bool = True

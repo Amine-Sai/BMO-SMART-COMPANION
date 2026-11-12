@@ -180,6 +180,8 @@ def run_brain_voice(scene_cache) -> None:
         # Load settings from config (llm.yaml)
         settings = load_settings()
         llm_settings = settings.llm
+        # Ensure model path is absolute for llama-cpp
+        llm_settings = llm_settings.model_copy(update={"host": str(MODEL_PATH.absolute())})
         audio_settings = settings.audio or AudioSettings()
 
         # Monkey-patch VAD for longer timeout
@@ -288,7 +290,10 @@ def run_text_input(turn_manager) -> None:
             break
 
         try:
-            turn_manager.start_text_turn(text)
+            # Use run_text_turn for synchronous response display
+            reply = turn_manager.run_text_turn(text)
+            if reply:
+                print(f"bmo: {reply.strip()}", flush=True)
         except Exception as exc:
             logger.error("Text input turn failed: %s", exc)
 
