@@ -14,6 +14,7 @@ import signal
 import sys
 import socket
 import json
+import re
 from pathlib import Path
 
 import paho.mqtt.client as mqtt
@@ -21,6 +22,8 @@ import paho.mqtt.client as mqtt
 from bmo_contracts.models import Scene, VisionStatus
 from bmo_contracts.topics import VISION_CONTEXT, VISION_STATUS, VISION_CMD
 from brain.vision_intent import vision_target
+from brain.emotions import strip_emotion_tag
+from brain.tools.registry import needs_tools
 
 warnings.filterwarnings("ignore", category=FutureWarning, module="torch")
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="sounddevice")
@@ -270,7 +273,7 @@ def run_brain_voice(scene_cache) -> None:
         prompt_builder = PromptBuilder(
             scene_cache,
             max_turns=llm_settings.history_turns,
-            max_total_tokens=llm_settings.history_max_tokens,
+            max_total_tokens=max(1024, llm_settings.num_ctx - 1024),
         )
         tools = ToolRegistry()
         register_scene_tools(tools, scene_cache)
@@ -420,21 +423,52 @@ def run_text_input(turn_manager) -> None:
                 except Exception as exc:
                     logger.warning("Vision request failed: %s", exc)
 
-            # Stream LLM response immediately for text mode
+            # Stream LLM response immediately for text mode, hiding the
+            # leading [emotion] tag (it is never spoken or shown).
             print("bmo: ", end="", flush=True, file=stdout)
             full_reply = []
+            head = ""
+            tag_done = False
+            printed_any = False
+
+            def _emit(piece: str) -> None:
+                nonlocal printed_any
+                if not printed_any:
+                    piece = piece.lstrip()
+                if piece:
+                    print(piece, end="", flush=True, file=stdout)
+                    printed_any = True
+
             for chunk in turn_manager._llm.chat(
                 turn_manager._prompt_builder.build_messages(text, scene_target=target),
-                tools=turn_manager._tools.ollama_tools(),
+                tools=(
+                    turn_manager._tools.ollama_tools()
+                    if needs_tools(text)
+                    else None
+                ),
                 stream=True,
                 cancel_event=turn_manager.cancel_event,
             ):
-                if chunk.text:
-                    print(chunk.text, end="", flush=True, file=stdout)
-                    full_reply.append(chunk.text)
+                if not chunk.text:
+                    continue
+                full_reply.append(chunk.text)
+                if tag_done:
+                    _emit(chunk.text)
+                    continue
+                head += chunk.text
+                match = re.match(r"^\s*\[[a-zA-Z_]+\]\s*", head)
+                if match:
+                    head = head[match.end():]
+                    tag_done = True
+                    _emit(head)
+                elif len(head) >= 24:
+                    tag_done = True
+                    _emit(head)
+            if not tag_done and head:
+                _emit(head)
             print(flush=True, file=stdout)
-            
-            reply_text = "".join(full_reply)
+
+            reply_text = strip_emotion_tag("".join(full_reply))
             
             # Optionally speak the response via TTS
             if use_tts and tts is not None and sink is not None and reply_text.strip():

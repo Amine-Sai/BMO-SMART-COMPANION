@@ -145,7 +145,7 @@ def test_full_voice_turn() -> None:
     wake = DummyWake(score=0.95)
     vad = DummyVAD(utterance=b"\x00" * 1600)
     stt = DummySTT(text="Hello BMO")
-    llm = DummyLLM(text="Hi there friend!")
+    llm = DummyLLM(text="[happy] Hi there friend!")
     builder = DummyPromptBuilder()
     tools = ToolRegistry()
     tts = DummyTTS()
@@ -181,6 +181,7 @@ def test_full_voice_turn() -> None:
     assert published[0][0] == BRAIN_SAY
     say = BrainSay.model_validate_json(published[0][1].decode("utf-8"))
     assert say.emotion == Emotion.HAPPY
+    assert say.text == "Hi there friend!"
     assert "Hi there friend!" in say.text
     assert tts.spoken == ["Hi there friend!"]
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 import time
@@ -92,3 +93,15 @@ class ToolRegistry:
 
         res = spec.handler(args_obj)
         return res if "ok" in res else {"ok": True, **res}
+
+
+_TOOL_INTENT_RE = re.compile(
+    r"\b(?:forget|delete|remove|remember|memorize|memorise|register|enroll|enrol|"
+    r"rename|save|list|roster|my name|who am i)\b",
+    re.IGNORECASE,
+)
+
+
+def needs_tools(text: str) -> bool:
+    """Return True when an utterance likely needs a tool to be fulfilled."""
+    return bool(text and _TOOL_INTENT_RE.search(text))

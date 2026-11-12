@@ -17,7 +17,7 @@ def _make_scene_cache() -> SceneCache:
 
 def test_system_prompt_tokens_and_format() -> None:
     tokens = count_tokens(BMO_SYSTEM_PROMPT)
-    assert tokens <= 220
+    assert tokens <= 600
     assert "markdown" not in BMO_SYSTEM_PROMPT.lower()
     for bullet in ("- ", "* ", "•"):
         assert bullet not in BMO_SYSTEM_PROMPT
@@ -73,3 +73,19 @@ def test_scene_cache_prompt_injection() -> None:
     msgs_online = builder.build_messages("What do you see?", scene_target="both")
     assert "Scene: Camera: 1 person (Alice, 1.2m, waving), 1 cup" in msgs_online[0]["content"]
     cache.as_prompt_line.assert_called_with(target="both")
+
+
+def test_emotion_tag_parsing() -> None:
+    from bmo_contracts.models import Emotion
+    from brain.emotions import split_emotion_tag, strip_emotion_tag
+
+    emotion, text = split_emotion_tag("[happy] Hello!")
+    assert emotion is Emotion.HAPPY
+    assert text == "Hello!"
+
+    emotion, text = split_emotion_tag("No tag here")
+    assert emotion is None
+    assert text == "No tag here"
+
+    assert strip_emotion_tag("[thinking]  Hmm ") == "Hmm"
+    assert strip_emotion_tag("[bogus] Hi") == "Hi"

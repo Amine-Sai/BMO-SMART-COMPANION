@@ -20,6 +20,8 @@ from brain.prompt import PromptBuilder
 from brain.state import BrainState, BrainStateMachine
 from brain.stream import SentenceSplitter
 from brain.tools.registry import ToolRegistry
+from brain.emotions import split_emotion_tag, strip_emotion_tag
+from brain.tools.registry import needs_tools
 from brain.vision_intent import vision_target
 
 logger = logging.getLogger(__name__)
@@ -240,10 +242,17 @@ class TurnManager:
 
         logger.info("LLM chat starting for user text: %r", user_text[:80])
 
+        turn_emotion = Emotion.NEUTRAL
+
         def _speak_sentence(sentence: str) -> None:
-            nonlocal first_sentence_emitted, tts_first_chunk_ms
+            nonlocal first_sentence_emitted, tts_first_chunk_ms, turn_emotion
             clean = sentence.strip()
             if not clean or self.cancel_event.is_set():
+                return
+            parsed_emotion, clean = split_emotion_tag(clean)
+            if parsed_emotion is not None:
+                turn_emotion = parsed_emotion
+            if not clean:
                 return
             if not first_sentence_emitted:
                 first_sentence_emitted = True
@@ -252,7 +261,7 @@ class TurnManager:
                     say = BrainSay(
                         utt_id=utt_id,
                         text=clean,
-                        emotion=Emotion.HAPPY,
+                        emotion=turn_emotion,
                     )
                     self._publish_fn(
                         BRAIN_SAY,
@@ -272,7 +281,7 @@ class TurnManager:
                     say = BrainSay(
                         utt_id=utt_id,
                         text=clean,
-                        emotion=Emotion.HAPPY,
+                        emotion=turn_emotion,
                     )
                     self._publish_fn(
                         BRAIN_SAY,
@@ -296,9 +305,10 @@ class TurnManager:
         # The single-flight gate guarantees only one llama-cpp decode at a time.
         t_chat0 = self._clock()
         try:
+            tool_specs = self._tools.ollama_tools() if needs_tools(user_text) else None
             for chunk in self._llm.chat(
                 messages,
-                tools=self._tools.ollama_tools(),
+                tools=tool_specs,
                 stream=True,
                 cancel_event=self.cancel_event,
             ):
@@ -336,7 +346,7 @@ class TurnManager:
                     if self.cancel_event.is_set():
                         break
 
-        full_reply = "".join(reply_chunks)
+        full_reply = strip_emotion_tag("".join(reply_chunks))
         self._prompt_builder.record_turn(user_text, full_reply)
 
         if not self.cancel_event.is_set() and self._state_machine.state in (
