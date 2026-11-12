@@ -25,8 +25,8 @@ for _dir in (MODELS_DIR, GALLERY_DIR, OBJECT_GALLERY_DIR, DATA_DIR):
 DEVICE = "cpu"
 CAM_INDEX = int(os.environ.get("BMO_CAM", "0"))
 MAX_FPS = int(os.environ.get("BMO_MAX_FPS", "60"))
-OBJ_FRAME_STRIDE = int(os.environ.get("BMO_OBJ_STRIDE", "3"))
-OBJ_CONF = float(os.environ.get("BMO_OBJ_CONF", "0.50"))
+OBJ_FRAME_STRIDE = int(os.environ.get("BMO_OBJ_STRIDE", "1"))
+OBJ_CONF = float(os.environ.get("BMO_OBJ_CONF", "0.25"))
 FACE_TAU = float(os.environ.get("BMO_FACE_TAU", "0.45"))
 OBJECT_TAU = float(os.environ.get("BMO_OBJECT_TAU", "0.65"))
 SIGN_CONF = float(os.environ.get("BMO_SIGN_CONF", "0.90"))

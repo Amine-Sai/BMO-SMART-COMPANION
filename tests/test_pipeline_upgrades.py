@@ -231,9 +231,12 @@ class TestDecoupledDetectionCadence(unittest.TestCase):
     """Test object detection frame-stride decoupling logic."""
 
     def test_default_stride(self):
-        self.assertEqual(OBJ_FRAME_STRIDE, 3)
+        from assistant_cv.config import OBJ_FRAME_STRIDE
+        # Default changed to 1 for better detection on CPU
+        self.assertEqual(OBJ_FRAME_STRIDE, 1)
 
     def test_stride_cadence_simulation(self):
+        from assistant_cv.config import OBJ_FRAME_STRIDE
         cached_detections = []
         detector_invocations = 0
 
@@ -254,8 +257,9 @@ class TestDecoupledDetectionCadence(unittest.TestCase):
             self.assertEqual(len(detections), 1)
             self.assertEqual(detections[0]["label"], "lighter")
 
-        # In 12 frames, detection should run on frame 1 (initialization), then 3, 6, 9, 12 -> 5 times
-        self.assertEqual(detector_invocations, 5)
+        # With stride=1, detection runs every frame
+        expected_invocations = 12
+        self.assertEqual(detector_invocations, expected_invocations)
 
 
 if __name__ == "__main__":
