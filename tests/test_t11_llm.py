@@ -41,7 +41,7 @@ def test_load_settings_loads_llm_yaml() -> None:
     assert settings.llm.keep_alive == "5m"
     assert settings.llm.timeout_s == 30.0
     assert settings.llm.temperature == 0.7
-    assert settings.llm.n_gpu_layers == -1
+    assert settings.llm.n_gpu_layers == 20
     assert settings.llm.use_flash_attn is False
     assert settings.llm.n_threads == 4
 
