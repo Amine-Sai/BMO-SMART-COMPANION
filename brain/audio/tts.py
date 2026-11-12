@@ -43,21 +43,27 @@ class TextToSpeech:
         )
         if resolved_path.exists():
             try:
-                import io
-                import wave
                 import piper.voice  # type: ignore[import-untyped]
 
                 voice = piper.voice.PiperVoice.load(str(resolved_path), use_cuda=False)
-                wav_io = io.BytesIO()
-                with wave.open(wav_io, "wb") as wav_file:
-                    voice.synthesize(text, wav_file)
-                wav_io.seek(0)
-                with wave.open(wav_io, "rb") as wav_file:
-                    raw_bytes = wav_file.readframes(wav_file.getnframes())
-                    return np.frombuffer(raw_bytes, dtype=np.int16)
-            except Exception:
-                pass
+                chunks = list(voice.synthesize(text))
+                audio = np.concatenate([c.audio_int16_array for c in chunks])
 
+                # Resample from model sample rate (usually 22050) to system SAMPLE_RATE (16000)
+                model_sr = voice.config.sample_rate
+                if model_sr != SAMPLE_RATE:
+                    # Simple linear interpolation resampling
+                    duration = len(audio) / model_sr
+                    target_len = int(duration * SAMPLE_RATE)
+                    if target_len > 0:
+                        indices = np.linspace(0, len(audio) - 1, target_len)
+                        audio = np.interp(indices, np.arange(len(audio)), audio).astype(np.int16)
+                return audio
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).error("Piper synthesis failed: %s", exc)
+
+        # Fallback: sine wave
         word_count = max(1, len(text.split()))
         num_samples = word_count * FRAME_SAMPLES * 4
         t = np.linspace(0, num_samples / SAMPLE_RATE, num_samples, endpoint=False)
