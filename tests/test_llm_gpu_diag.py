@@ -21,6 +21,7 @@ def test_cpu_only_build_logs_error_when_gpu_layers_requested(
             self.kwargs = kwargs
 
     monkeypatch.setattr(llm_mod, "Llama", FakeLlama)
+    monkeypatch.setattr(llm_mod, "llama_supports_gpu_offload", lambda: False)
     monkeypatch.setattr(llm_mod, "LLAMA_CPP_AVAILABLE", True)
     backend = LlamaCppBackend(make_llamacpp_settings(n_gpu_layers=-1))
 
@@ -45,6 +46,7 @@ def test_gpu_offload_supported_does_not_log_error(
             return True
 
     monkeypatch.setattr(llm_mod, "Llama", FakeLlama)
+    monkeypatch.setattr(llm_mod, "llama_supports_gpu_offload", lambda: False)
     monkeypatch.setattr(llm_mod, "LLAMA_CPP_AVAILABLE", True)
     backend = LlamaCppBackend(make_llamacpp_settings(n_gpu_layers=-1))
 
@@ -62,6 +64,7 @@ def test_cpu_only_build_is_quiet_when_cpu_explicitly_requested(
             self.kwargs = kwargs
 
     monkeypatch.setattr(llm_mod, "Llama", FakeLlama)
+    monkeypatch.setattr(llm_mod, "llama_supports_gpu_offload", lambda: False)
     monkeypatch.setattr(llm_mod, "LLAMA_CPP_AVAILABLE", True)
     backend = LlamaCppBackend(make_llamacpp_settings(n_gpu_layers=0))
 
@@ -87,6 +90,7 @@ def test_chat_timings_are_logged(
             )
 
     monkeypatch.setattr(llm_mod, "Llama", FakeLlama)
+    monkeypatch.setattr(llm_mod, "llama_supports_gpu_offload", lambda: False)
     monkeypatch.setattr(llm_mod, "LLAMA_CPP_AVAILABLE", True)
     backend = LlamaCppBackend(make_llamacpp_settings(n_gpu_layers=0))
 
@@ -109,6 +113,7 @@ def test_chat_error_still_surfaces_as_chunk(monkeypatch: pytest.MonkeyPatch) -> 
             raise RuntimeError("boom")
 
     monkeypatch.setattr(llm_mod, "Llama", FakeLlama)
+    monkeypatch.setattr(llm_mod, "llama_supports_gpu_offload", lambda: False)
     monkeypatch.setattr(llm_mod, "LLAMA_CPP_AVAILABLE", True)
     backend = LlamaCppBackend(make_llamacpp_settings(n_gpu_layers=0))
 

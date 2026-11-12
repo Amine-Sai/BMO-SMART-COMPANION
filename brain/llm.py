@@ -10,10 +10,11 @@ import httpx
 from brain.settings import LLMSettings
 
 try:
-    from llama_cpp import Llama
+    from llama_cpp import Llama, llama_supports_gpu_offload
     LLAMA_CPP_AVAILABLE = True
 except ImportError:
     Llama = None  # type: ignore
+    llama_supports_gpu_offload = None  # type: ignore
     LLAMA_CPP_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
@@ -198,13 +199,22 @@ class LlamaCppBackend:
 
     def _check_gpu_offload(self) -> None:
         """Warn loudly when n_gpu_layers was requested but this build has no CUDA."""
-        # instance lookup also resolves the newer static method; absent in old builds
+        supported = False
+        # 1. instance method (newer llama-cpp-python)
         probe = getattr(self._llm, "supports_gpu_offload", None)
-        try:
-            supported = bool(probe()) if callable(probe) else False
-        except Exception as exc:  # capability probe must never break loading
-            logger.warning("llama-cpp GPU offload probe failed: %s", exc)
-            supported = False
+        if callable(probe):
+            try:
+                supported = bool(probe())
+            except Exception as exc:  # capability probe must never break loading
+                logger.warning("llama-cpp GPU offload probe failed: %s", exc)
+                supported = False
+        # 2. module-level function (llama-cpp-python <= 0.3.36)
+        elif callable(llama_supports_gpu_offload):
+            try:
+                supported = bool(llama_supports_gpu_offload())
+            except Exception as exc:
+                logger.warning("llama-cpp GPU offload probe failed: %s", exc)
+                supported = False
         if self._s.n_gpu_layers != 0 and not supported:
             logger.error(
                 "llama-cpp-python has no GPU offload support (CPU-only build): "
