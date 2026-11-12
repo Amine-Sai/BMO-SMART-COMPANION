@@ -271,9 +271,8 @@ def run_brain_voice(scene_cache) -> None:
 def run_text_input(turn_manager) -> None:
     """Read typed lines from stdin and feed them into the same turn pipeline.
 
-    Reuses TurnManager.start_text_turn -> run_text_turn, so typed text goes
-    through LLM -> TTS -> speaker exactly like voice input. Runs until
-    _shutdown is set or the user types 'quit'/'exit'.
+    For text mode, print LLM chunks immediately (streaming) without waiting for TTS.
+    Runs until _shutdown is set or the user types 'quit'/'exit'.
     """
     while not _shutdown.is_set():
         try:
@@ -290,10 +289,21 @@ def run_text_input(turn_manager) -> None:
             break
 
         try:
-            # Use run_text_turn for synchronous response display
-            reply = turn_manager.run_text_turn(text)
-            if reply:
-                print(f"bmo: {reply.strip()}", flush=True)
+            # Stream LLM response immediately for text mode
+            print("bmo: ", end="", flush=True)
+            full_reply = []
+            for chunk in turn_manager._llm.chat(
+                turn_manager._prompt_builder.build_messages(text),
+                tools=turn_manager._tools.ollama_tools(),
+                stream=True,
+                cancel_event=turn_manager.cancel_event,
+            ):
+                if chunk.text:
+                    print(chunk.text, end="", flush=True)
+                    full_reply.append(chunk.text)
+            print(flush=True)
+            # Record turn in history
+            turn_manager._prompt_builder.record_turn(text, "".join(full_reply))
         except Exception as exc:
             logger.error("Text input turn failed: %s", exc)
 
