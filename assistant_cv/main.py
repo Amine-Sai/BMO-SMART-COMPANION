@@ -902,6 +902,39 @@ def run_pipeline(
                 else:
                     detections = cached_detections
 
+            # ---------------------------------------------------------------
+            # 2b. Temporal Detection Fusion: merge last 3 frames for stability
+            # ---------------------------------------------------------------
+            # Maintain rolling buffer of last 3 frames' detections
+            if not hasattr(run_pipeline, "_det_buffer"):
+                run_pipeline._det_buffer = []  # list of list[dict]
+            run_pipeline._det_buffer.append(detections)
+            if len(run_pipeline._det_buffer) > 3:
+                run_pipeline._det_buffer.pop(0)
+
+            # Fuse detections across buffer: 
+            # - For persons: keep ALL detections (different track_ids)
+            # - For objects: per label, keep highest-conf bbox
+            fused_detections: list[dict[str, Any]] = []
+            label_best: dict[str, dict[str, Any]] = {}
+            for frame_dets in run_pipeline._det_buffer:
+                for det in frame_dets:
+                    lbl = det.get("label")
+                    if not lbl:
+                        continue
+                    if lbl == "person":
+                        # Keep all person detections (different track_ids)
+                        fused_detections.append(det)
+                    else:
+                        conf = det.get("conf", 0.0)
+                        if lbl not in label_best or conf > label_best[lbl].get("conf", 0.0):
+                            label_best[lbl] = det
+            # Add best object detections
+            fused_detections.extend(label_best.values())
+
+            # Use fused detections for downstream processing
+            detections = fused_detections
+
             # Step active object enrollment session if running
             object_enroll_info: dict[str, Any] | None = None
             if auto_object_enroll_session is not None:
