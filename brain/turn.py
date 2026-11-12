@@ -250,7 +250,11 @@ class TurnManager:
                         False,
                     )
                 t_tts0 = self._clock()
-                self._tts.speak_sentence(clean, self._sink, cancel_event=self.cancel_event)
+                try:
+                    self._tts.speak_sentence(clean, self._sink, cancel_event=self.cancel_event)
+                except Exception as exc:
+                    logger.error("TTS speak_sentence failed: %s", exc)
+                    return
                 tts_first_chunk_ms = (self._clock() - t_tts0) * 1000.0
             else:
                 if self._publish_fn is not None:
@@ -265,7 +269,18 @@ class TurnManager:
                         1,
                         False,
                     )
-                self._tts.speak_sentence(clean, self._sink, cancel_event=self.cancel_event)
+                try:
+                    self._tts.speak_sentence(clean, self._sink, cancel_event=self.cancel_event)
+                except Exception as exc:
+                    logger.error("TTS speak_sentence failed: %s", exc)
+                    return
+
+            # Wait for audio to finish playing
+            if hasattr(self._sink, 'drain'):
+                try:
+                    self._sink.drain()
+                except Exception as exc:
+                    logger.error("Sink drain failed: %s", exc)
 
         # The single-flight gate guarantees only one llama-cpp decode at a time.
         t_chat0 = self._clock()

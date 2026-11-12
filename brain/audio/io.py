@@ -253,48 +253,26 @@ class SoundDeviceSink:
     def __init__(self, sample_rate: int = SAMPLE_RATE, device: int | str | None = None) -> None:
         self.sample_rate = sample_rate
         self.device = device
-        self._stream: sd.OutputStream | None = None
-        self._written_samples = 0
-        self._played_samples = 0
+        self._buffer: list[np.ndarray] = []
 
     def write_samples(self, pcm: np.ndarray | bytes) -> None:
         arr = to_int16(pcm)
         if len(arr) == 0:
             return
-        if self._stream is None:
-            self._stream = sd.OutputStream(
-                samplerate=self.sample_rate,
-                channels=1,
-                dtype="int16",
-                device=self.device,
-            )
-            self._stream.start()
-        self._stream.write(arr)
-        self._written_samples += len(arr)
+        self._buffer.append(arr)
 
-    def drain(self) -> None:
-        """Wait for all written audio to finish playing."""
-        if self._stream is not None:
-            try:
-                # Wait for the stream to finish playing all queued audio
-                while self._stream.active:
-                    sd.sleep(10)
-            except Exception:
-                # Stream might be invalid, ignore
-                pass
+    def drain(self, timeout_s: float = 30.0) -> None:
+        """Play all buffered audio and wait for completion."""
+        if not self._buffer:
+            return
+        audio = np.concatenate(self._buffer)
+        self._buffer.clear()
+        sd.play(audio, samplerate=self.sample_rate, blocking=True)
 
     def stop(self) -> None:
-        if self._stream is not None:
-            try:
-                self._stream.abort()
-            except Exception:
-                pass
+        sd.stop()
+        self._buffer.clear()
 
     def close(self) -> None:
-        if self._stream is not None:
-            try:
-                self._stream.stop()
-                self._stream.close()
-            except Exception:
-                pass
-            self._stream = None
+        sd.stop()
+        self._buffer.clear()
