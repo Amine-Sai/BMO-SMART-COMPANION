@@ -236,9 +236,9 @@ class TestConfigAndClasses(unittest.TestCase):
     def test_config_constants(self):
         from assistant_cv.config import MAX_FPS, OBJ_CONF, load_object_classes
         self.assertEqual(MAX_FPS, 60)
-        # OBJ_CONF default lowered to 0.25 for better YOLO-World detection on CPU
-        self.assertGreaterEqual(OBJ_CONF, 0.20)
-        self.assertLessEqual(OBJ_CONF, 0.50)
+        # OBJ_CONF default raised to 0.45 to reduce false positives on CPU
+        self.assertGreaterEqual(OBJ_CONF, 0.40)
+        self.assertLessEqual(OBJ_CONF, 0.55)
 
         # Test load_object_classes with dict format
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:

@@ -175,7 +175,7 @@ def run_brain_voice(scene_cache) -> None:
         from pathlib import Path
 
         MODEL_PATH = Path("models/Qwen3.5-4B-Q4_K_M.gguf")
-        PIPER_VOICE_PATH = Path(__file__).parent / "models/piper/en_US-lessac-medium.onnx"
+        PIPER_VOICE_PATH = Path(__file__).parent / "models/piper/bmo.onnx"
 
         # Load settings from config (llm.yaml)
         settings = load_settings()
