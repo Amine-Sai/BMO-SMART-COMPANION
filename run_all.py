@@ -13,12 +13,14 @@ import time
 import signal
 import sys
 import socket
+import json
 from pathlib import Path
 
 import paho.mqtt.client as mqtt
 
 from bmo_contracts.models import Scene, VisionStatus
-from bmo_contracts.topics import VISION_CONTEXT, VISION_STATUS
+from bmo_contracts.topics import VISION_CONTEXT, VISION_STATUS, VISION_CMD
+from brain.vision_intent import is_vision_intent
 
 warnings.filterwarnings("ignore", category=FutureWarning, module="torch")
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="sounddevice")
@@ -115,6 +117,33 @@ def stop_scene_subscriber() -> None:
         _scene_sub_client = None
 
 
+def request_vision(scene_cache, seconds: float = 6.0, timeout_s: float = 4.0) -> None:
+    """Ask the CV pipeline to do a fresh detection pass, then wait for it.
+
+    CV runs idle (no object detection) by default to keep the CPU free. A
+    vision question enables the heavy models for a few seconds via MQTT and we
+    block briefly until the scene cache receives a newer frame.
+    """
+    client = _scene_sub_client
+    if client is None:
+        return
+    before = scene_cache.last_update_time()
+    payload = json.dumps({"command": "look", "args": {"seconds": seconds}})
+    try:
+        client.publish(VISION_CMD, payload, qos=1)
+    except Exception as exc:
+        logger.warning("Failed to publish vision look request: %s", exc)
+        return
+
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline and not _shutdown.is_set():
+        if scene_cache.last_update_time() > before:
+            logger.info("Fresh scene received for vision query")
+            return
+        time.sleep(0.05)
+    logger.warning("No fresh scene within %.1fs; answering with last known scene", timeout_s)
+
+
 def run_cv_pipeline():
     """Run the CV pipeline in a thread with output redirected to log file."""
     import os
@@ -147,7 +176,7 @@ def run_cv_pipeline():
                     enable_mqtt=True,
                     mqtt_host="127.0.0.1",
                     mqtt_port=1883,
-                    lazy=False,
+                    lazy=True,
                 )
             except Exception as e:
                 logger.error("CV pipeline error: %s", e)
@@ -246,6 +275,7 @@ def run_brain_voice(scene_cache) -> None:
             tts=tts,
             sink=audio_sink,
             publish_fn=lambda t, p, q, r: None,
+            vision_request_fn=lambda: request_vision(scene_cache),
         )
 
         source = SoundDeviceSource(audio_settings.sample_rate)
@@ -262,8 +292,13 @@ def run_brain_voice(scene_cache) -> None:
         _text_thread.start()
 
         # Continuous listen loop: segment one utterance with VAD, transcribe it,
-        # and only respond when it starts with the "hey bmo" wake phrase.
-        # This also keeps the command that follows the wake word.
+        # and respond when it starts with the "hey bmo" wake phrase. For a short
+        # window after a reply, plain follow-up questions are accepted too.
+        try:
+            followup_s = float(os.environ.get("BMO_FOLLOWUP_S", "12"))
+        except ValueError:
+            followup_s = 12.0
+        followup_until = 0.0
         while not _shutdown.is_set():
             try:
                 pcm = vad.collect_utterance(source, max_duration_s=10.0)
@@ -278,18 +313,25 @@ def run_brain_voice(scene_cache) -> None:
                 continue
 
             heard = stt_res.text.strip()
+            duration_s = len(pcm) / audio_settings.sample_rate
             command = extract_wake_command(heard)
+            in_followup = False
             if command is None:
-                logger.debug("Ignoring speech (no wake word): %r", heard[:80])
-                continue
+                if followup_s > 0 and time.monotonic() < followup_until:
+                    command = heard
+                    in_followup = True
+                else:
+                    print(f'  heard {duration_s:.1f}s: "{heard}"  (no wake word)', flush=True)
+                    continue
 
-            logger.info("Wake word detected: %r", heard[:80])
-            print(f"\n>>> You said: {heard}", flush=True)
+            tag = "follow-up" if in_followup else "wake"
+            print(f'  heard {duration_s:.1f}s: "{heard}"  <- {tag}', flush=True)
             try:
                 if command:
                     turn_manager.run_text_turn(command)
                 else:
                     turn_manager.listen_and_respond(source)
+                followup_until = time.monotonic() + followup_s
             except Exception as exc:
                 logger.error("Turn failed: %s", exc, exc_info=True)
 
@@ -343,6 +385,13 @@ def run_text_input(turn_manager) -> None:
             break
 
         try:
+            # Ask CV for a fresh look before answering camera questions.
+            if is_vision_intent(text) and turn_manager._vision_request_fn is not None:
+                try:
+                    turn_manager._vision_request_fn()
+                except Exception as exc:
+                    logger.warning("Vision request failed: %s", exc)
+
             # Stream LLM response immediately for text mode
             print("bmo: ", end="", flush=True, file=stdout)
             full_reply = []
@@ -426,4 +475,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import os
+
+    try:
+        main()
+    finally:
+        # Daemon threads hold C-extension state (CUDA/camera/torch); normal
+        # interpreter teardown can segfault. Exit immediately after shutdown.
+        logging.shutdown()
+        os._exit(0)

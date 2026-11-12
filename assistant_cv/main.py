@@ -638,6 +638,9 @@ def run_pipeline(
     last_context_pub_time = 0.0
     last_scene_pub_time = 0.0
     last_scene_sig: Any = None
+    # In lazy mode the heavy detectors stay off until the brain requests a
+    # "look". This timestamp keeps them active for a short window.
+    vision_active_until: float = 0.0
 
     print("\nInteractive Hotkeys:")
     print("  1 / 2 / 3 : Toggle Objects, Face ID, or Sign Language modules")
@@ -723,6 +726,21 @@ def run_pipeline(
                         elif new_mode == "idle":
                             toggles["2:FACE"] = toggles["3:SIGN"] = False
                         mqtt_bridge.publish_response(cmd_type, "applied", {"mode": new_mode}, req_id)
+
+                    elif cmd_type in ("look", "capture", "activate_vision", "snapshot"):
+                        try:
+                            seconds = float(args_dict.get("seconds", cmd.get("seconds", 6.0)))
+                        except (TypeError, ValueError):
+                            seconds = 6.0
+                        vision_active_until = time.monotonic() + max(1.0, seconds)
+                        toggles["1:OBJ"] = True
+                        toggles["2:FACE"] = True
+                        cached_detections = []
+                        last_scene_sig = None  # force a publish once detection runs
+                        events_log.append(f"Vision active for {seconds:.0f}s")
+                        mqtt_bridge.publish_response(
+                            cmd_type, "success", {"seconds": seconds}, req_id
+                        )
 
                     elif cmd_type == "status":
                         status_data = {
@@ -883,12 +901,15 @@ def run_pipeline(
             # ---------------------------------------------------------------
             # 2. Objects & Person Detection (Decoupled at fps / 3 stride)
             # ---------------------------------------------------------------
+            vision_active = time.monotonic() < vision_active_until
+            obj_enabled = toggles["1:OBJ"] and (not toggles["L:LAZY"] or vision_active)
             detections: list[dict[str, Any]] = []
-            if toggles["1:OBJ"]:
+            if obj_enabled:
                 run_det = (
                     (auto_object_enroll_session is not None)
                     or (frame_count % OBJ_FRAME_STRIDE == 0)
                     or not cached_detections
+                    or vision_active
                 )
                 if run_det:
                     t_obj0 = time.perf_counter()
@@ -983,7 +1004,7 @@ def run_pipeline(
                     auto_enroll_session.completed or auto_enroll_session.failed
                 ):
                     needs_face = True
-                elif not toggles["L:LAZY"]:
+                elif not toggles["L:LAZY"] or vision_active:
                     needs_face = True
                 elif person_present:
                     needs_face = synchronizer.needs_face_recognition(persons)
@@ -1092,9 +1113,13 @@ def run_pipeline(
                     (scene_contract["last_sign"]["text"] if scene_contract["last_sign"] else None),
                 )
                 if scene_sig != last_scene_sig and (now_sec - last_scene_pub_time >= 1.0):
-                    mqtt_bridge.publish_scene(scene_contract)
-                    last_scene_sig = scene_sig
-                    last_scene_pub_time = now_sec
+                    has_content = bool(scene_contract["people"]) or bool(scene_contract["objects"])
+                    # While idle, keep the last real scene instead of replacing
+                    # it with empty detections; only active looks publish blanks.
+                    if has_content or vision_active or not toggles["L:LAZY"]:
+                        mqtt_bridge.publish_scene(scene_contract)
+                        last_scene_sig = scene_sig
+                        last_scene_pub_time = now_sec
 
                 if now_sec - last_context_pub_time > 5.0:
                     if person_present or short_term_memory.current_objects:

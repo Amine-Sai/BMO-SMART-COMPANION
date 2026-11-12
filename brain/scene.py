@@ -150,6 +150,11 @@ class SceneCache:
         with self._lock:
             return self._online
 
+    def last_update_time(self) -> float:
+        """Monotonic timestamp of the last scene update (0.0 if none)."""
+        with self._lock:
+            return self._updated_at
+
     def is_stale(self) -> bool:
         with self._lock:
             if not self._online:
