@@ -173,6 +173,7 @@ def run_brain_voice(scene_cache) -> None:
         from brain.turn import TurnManager
         from brain.settings import load_settings
         from pathlib import Path
+        import os
 
         MODEL_PATH = Path("models/Qwen3.5-4B-Q4_K_M.gguf")
         PIPER_VOICE_PATH = Path(__file__).parent / "models/piper/bmo.onnx"
@@ -183,6 +184,14 @@ def run_brain_voice(scene_cache) -> None:
         # Ensure model path is absolute for llama-cpp
         llm_settings = llm_settings.model_copy(update={"host": str(MODEL_PATH.absolute())})
         audio_settings = settings.audio or AudioSettings()
+
+        # Audio output device (optional, for systems with multiple audio devices)
+        audio_device = os.environ.get("BMO_AUDIO_DEVICE")
+        if audio_device is not None:
+            try:
+                audio_device = int(audio_device)
+            except ValueError:
+                pass  # Use string device name
 
         # Monkey-patch VAD for longer timeout
         original_collect = VoiceActivityDetector.collect_utterance
@@ -213,7 +222,7 @@ def run_brain_voice(scene_cache) -> None:
         tools = ToolRegistry()
         register_scene_tools(tools, scene_cache)
 
-        audio_sink = SoundDeviceSink(audio_settings.sample_rate)
+        audio_sink = SoundDeviceSink(audio_settings.sample_rate, device=audio_device)
 
         turn_manager = TurnManager(
             state_machine=state_machine,
@@ -271,11 +280,18 @@ def run_brain_voice(scene_cache) -> None:
 def run_text_input(turn_manager) -> None:
     """Read typed lines from stdin and feed them into the same turn pipeline.
 
-    For text mode, print LLM chunks immediately (streaming) without waiting for TTS.
+    For text mode, print LLM chunks immediately (streaming) and optionally speak via TTS.
     Runs until _shutdown is set or the user types 'quit'/'exit'.
     """
     import sys
+    import os
     stdout = sys.__stdout__  # Use unbuffered original stdout (thread-safe)
+    
+    # Check if TTS should be used for text input
+    use_tts = os.environ.get("BMO_TEXT_TTS", "0") == "1"
+    tts = turn_manager._tts
+    sink = turn_manager._sink
+    
     while not _shutdown.is_set():
         try:
             line = input("> ")
@@ -304,6 +320,13 @@ def run_text_input(turn_manager) -> None:
                     print(chunk.text, end="", flush=True, file=stdout)
                     full_reply.append(chunk.text)
             print(flush=True, file=stdout)
+            
+            # Optionally speak the response via TTS
+            if use_tts and tts is not None and sink is not None:
+                reply_text = "".join(full_reply)
+                if reply_text.strip():
+                    tts.speak_sentence(reply_text, sink)
+            
             # Record turn in history
             turn_manager._prompt_builder.record_turn(text, "".join(full_reply))
         except Exception as exc:

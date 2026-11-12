@@ -127,13 +127,22 @@ def main():
         use_mlock=False,
     )
     llm = LoggingLLMClient(LLMClient(llm_settings))
+    import os
+
     llm.prewarm()
 
     prompt_builder = PromptBuilder(scene_cache, SceneSettings())
     tools = ToolRegistry()
     register_scene_tools(tools, scene_cache)
 
-    audio_sink = SoundDeviceSink(AUDIO_SETTINGS.sample_rate)
+    audio_device = os.environ.get("BMO_AUDIO_DEVICE")
+    if audio_device is not None:
+        try:
+            audio_device = int(audio_device)
+        except ValueError:
+            pass
+
+    audio_sink = SoundDeviceSink(AUDIO_SETTINGS.sample_rate, device=audio_device)
 
     turn_manager = TurnManager(
         state_machine=state_machine,
@@ -151,7 +160,7 @@ def main():
     try:
         while True:
             source = SoundDeviceSource(AUDIO_SETTINGS.sample_rate)
-            audio_sink = SoundDeviceSink(AUDIO_SETTINGS.sample_rate)
+            audio_sink = SoundDeviceSink(AUDIO_SETTINGS.sample_rate, device=audio_device)
             
             # Update turn manager with fresh sink
             turn_manager._sink = audio_sink

@@ -250,8 +250,9 @@ class SoundDeviceSource:
 class SoundDeviceSink:
     """AudioSink implementation backed by sounddevice."""
 
-    def __init__(self, sample_rate: int = SAMPLE_RATE) -> None:
+    def __init__(self, sample_rate: int = SAMPLE_RATE, device: int | str | None = None) -> None:
         self.sample_rate = sample_rate
+        self.device = device
         self._stream: sd.OutputStream | None = None
 
     def write_samples(self, pcm: np.ndarray | bytes) -> None:
@@ -263,6 +264,7 @@ class SoundDeviceSink:
                 samplerate=self.sample_rate,
                 channels=1,
                 dtype="int16",
+                device=self.device,
             )
             self._stream.start()
         self._stream.write(arr)
