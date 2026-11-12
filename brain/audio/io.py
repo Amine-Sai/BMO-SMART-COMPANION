@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 import threading
 import time
 from typing import Callable, Protocol, runtime_checkable
@@ -248,31 +250,90 @@ class SoundDeviceSource:
 
 
 class SoundDeviceSink:
-    """AudioSink implementation backed by sounddevice."""
+    """AudioSink implementation backed by sounddevice.
+
+    Playback prefers an external ``aplay`` subprocess because PortAudio
+    playback is unreliable once llama-cpp has initialized CUDA in the same
+    process (the ALSA device fails to open, so ``sd.play`` silently produces
+    no sound). A subprocess is isolated from that state. ``sd.play`` is kept
+    as a fallback when ``aplay`` is unavailable.
+    """
 
     def __init__(self, sample_rate: int = SAMPLE_RATE, device: int | str | None = None) -> None:
         self.sample_rate = sample_rate
         self.device = device
         self._buffer: list[np.ndarray] = []
+        self._proc: subprocess.Popen | None = None
+        self._lock = threading.Lock()
 
     def write_samples(self, pcm: np.ndarray | bytes) -> None:
         arr = to_int16(pcm)
         if len(arr) == 0:
             return
-        self._buffer.append(arr)
+        with self._lock:
+            self._buffer.append(arr)
+
+    def _aplay_device(self) -> str:
+        # aplay understands ALSA device names, not sounddevice integer indices.
+        return self.device if isinstance(self.device, str) else "default"
+
+    def _play_aplay(self, audio: np.ndarray) -> None:
+        cmd = [
+            "aplay",
+            "-D",
+            self._aplay_device(),
+            "-q",
+            "-t",
+            "raw",
+            "-f",
+            "S16_LE",
+            "-r",
+            str(self.sample_rate),
+            "-c",
+            "1",
+        ]
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+        with self._lock:
+            self._proc = proc
+        try:
+            proc.communicate(audio.tobytes())
+        finally:
+            with self._lock:
+                self._proc = None
 
     def drain(self, timeout_s: float = 30.0) -> None:
         """Play all buffered audio and wait for completion."""
-        if not self._buffer:
-            return
-        audio = np.concatenate(self._buffer)
-        self._buffer.clear()
+        with self._lock:
+            if not self._buffer:
+                return
+            audio = np.concatenate(self._buffer)
+            self._buffer.clear()
+
+        if shutil.which("aplay"):
+            try:
+                self._play_aplay(audio)
+                return
+            except Exception as exc:  # pragma: no cover - defensive
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "aplay playback failed, falling back to sounddevice: %s", exc
+                )
+
         sd.play(audio, samplerate=self.sample_rate, blocking=True)
 
     def stop(self) -> None:
+        with self._lock:
+            proc = self._proc
+            self._proc = None
+            self._buffer.clear()
+        if proc is not None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
         sd.stop()
-        self._buffer.clear()
 
     def close(self) -> None:
-        sd.stop()
-        self._buffer.clear()
+        self.stop()
+

@@ -224,13 +224,13 @@ def run_brain_voice(scene_cache) -> None:
 
         audio_sink = SoundDeviceSink(audio_settings.sample_rate, device=audio_device)
 
-        # Debug: test TTS immediately
-        logger.info("Testing TTS at startup...")
+        # Confirm audio output works before entering the turn loop.
         try:
-            ms = tts.speak_sentence("BMO voice system ready", audio_sink)
-            logger.info("Startup TTS test completed, latency: %.1fms", ms)
+            tts.speak_sentence("BMO voice system ready", audio_sink)
+            audio_sink.drain()
+            logger.info("Audio output check passed")
         except Exception as exc:
-            logger.error("Startup TTS test failed: %s", exc, exc_info=True)
+            logger.error("Audio output check failed: %s", exc, exc_info=True)
 
         turn_manager = TurnManager(
             state_machine=state_machine,
