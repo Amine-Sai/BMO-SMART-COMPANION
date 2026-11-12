@@ -26,3 +26,6 @@ assistant_cv/models/*.onnx
 # Local biometric & dataset directories
 assistant_cv/gallery/
 assistant_cv/data/*/*.npy
+
+# Local long-term memory
+data/

@@ -1,5 +1,6 @@
 from brain.llm import count_tokens
 from brain.scene import SceneCache
+from brain.vision_intent import vision_target
 from brain.settings import LLMSettings
 
 _LLM_DEFAULTS = LLMSettings()
@@ -71,18 +72,29 @@ class PromptBuilder:
         system_prompt: str = BMO_SYSTEM_PROMPT,
         max_turns: int = _LLM_DEFAULTS.history_turns,
         max_total_tokens: int = 2048,
+        memory: object | None = None,
     ) -> None:
         self.scene_cache = scene_cache
         self.system_prompt = system_prompt
         self.max_turns = max_turns
         self.max_total_tokens = max_total_tokens
+        self.memory = memory
         self.history = RollingHistory(max_turns=max_turns, max_total_tokens=max_total_tokens)
 
     def record_turn(self, user_text: str, assistant_text: str) -> None:
         self.history.add_turn(user_text, assistant_text)
 
     def build_messages(self, user_text: str, scene_target: str | None = None) -> list[dict[str, str]]:
+        if scene_target is None:
+            scene_target = vision_target(user_text)
         content = self.system_prompt
+        if self.memory is not None:
+            try:
+                lines = self.memory.as_prompt_lines()  # type: ignore[attr-defined]
+            except Exception:
+                lines = []
+            if lines:
+                content = f"{content}\nMEMORY (things you saved earlier; use when relevant):\n" + "\n".join(lines)
         if scene_target is not None:
             content = f"{content}\nScene: {self.scene_cache.as_prompt_line(target=scene_target)}"
         system_msg = {"role": "system", "content": content}

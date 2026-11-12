@@ -24,3 +24,32 @@ def split_emotion_tag(text: str) -> tuple[Emotion | None, str]:
 def strip_emotion_tag(text: str) -> str:
     """Remove a leading ``[happy]``-style tag, if present."""
     return split_emotion_tag(text)[1]
+
+
+class EmotionTagStreamFilter:
+    """Strip ``[emotion]`` tags from a streamed reply, holding partial tags."""
+
+    def __init__(self) -> None:
+        self._buf = ""
+
+    def feed(self, text: str) -> str:
+        self._buf += text or ""
+        out: list[str] = []
+        while True:
+            match = re.match(r"^\s*\[[a-zA-Z_]+\]\s*", self._buf)
+            if match is not None:
+                self._buf = self._buf[match.end():]
+                continue
+            partial = re.search(r"\[[a-zA-Z_]*$", self._buf)
+            if partial is not None:
+                out.append(self._buf[: partial.start()])
+                self._buf = self._buf[partial.start():]
+                break
+            out.append(re.sub(r"\[[a-zA-Z_]+\]\s*", "", self._buf))
+            self._buf = ""
+            break
+        return "".join(out)
+
+    def flush(self) -> str:
+        out, self._buf = self._buf, ""
+        return out

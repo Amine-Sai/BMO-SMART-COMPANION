@@ -95,9 +95,11 @@ class ToolRegistry:
         return res if "ok" in res else {"ok": True, **res}
 
 
+# Memory facts are captured deterministically (brain.memory_extract) and the
+# scene is injected into the prompt, so only explicit gallery mutations need
+# tool schemas. Passing tools on ordinary chat slows the 4B model and derails it.
 _TOOL_INTENT_RE = re.compile(
-    r"\b(?:forget|delete|remove|remember|memorize|memorise|register|enroll|enrol|"
-    r"rename|save|list|roster|my name|who am i)\b",
+    r"\b(?:register|enroll|enrol|rename|reload)\b",
     re.IGNORECASE,
 )
 

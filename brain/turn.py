@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 import threading
 import time
 import uuid
@@ -21,6 +22,7 @@ from brain.state import BrainState, BrainStateMachine
 from brain.stream import SentenceSplitter
 from brain.tools.registry import ToolRegistry
 from brain.emotions import split_emotion_tag, strip_emotion_tag
+from brain.memory_extract import apply_memory_effects
 from brain.tools.registry import needs_tools
 from brain.vision_intent import vision_target
 
@@ -137,7 +139,7 @@ class TurnManager:
                 self._state_machine.transition(BrainState.IDLE)
             return None
 
-        print(f"\n>>> You said: {stt_res.text}", flush=True)
+        print(f"\n>>> You said: {stt_res.text}", flush=True, file=sys.__stdout__)
 
         return self.run_text_turn(
             stt_res.text,
@@ -220,6 +222,14 @@ class TurnManager:
         vad_end_ts: float | None = None,
         stt_ms: float = 0.0,
     ) -> str:
+        memory = getattr(self._prompt_builder, "memory", None)
+        if memory is not None:
+            try:
+                for note in apply_memory_effects(user_text, memory):
+                    logger.info("memory: %s", note)
+            except Exception as exc:
+                logger.warning("memory update failed: %s", exc)
+
         vision_target_kind = vision_target(user_text)
         if self._vision_request_fn is not None and vision_target_kind:
             try:
@@ -254,8 +264,10 @@ class TurnManager:
                 turn_emotion = parsed_emotion
             if not clean:
                 return
+
             if not first_sentence_emitted:
                 first_sentence_emitted = True
+                print(f"bmo: {clean}", flush=True, file=sys.__stdout__)
                 self._state_machine.transition(BrainState.SPEAKING)
                 if self._publish_fn is not None:
                     say = BrainSay(
@@ -277,6 +289,7 @@ class TurnManager:
                     return
                 tts_first_chunk_ms = (self._clock() - t_tts0) * 1000.0
             else:
+                print(f"     {clean}", flush=True, file=sys.__stdout__)
                 if self._publish_fn is not None:
                     say = BrainSay(
                         utt_id=utt_id,

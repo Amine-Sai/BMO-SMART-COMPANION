@@ -7,6 +7,8 @@ CLI is used only for text input to the LLM.
 """
 
 import logging
+import os
+import subprocess
 import warnings
 import threading
 import time
@@ -14,7 +16,6 @@ import signal
 import sys
 import socket
 import json
-import re
 from pathlib import Path
 
 import paho.mqtt.client as mqtt
@@ -22,7 +23,8 @@ import paho.mqtt.client as mqtt
 from bmo_contracts.models import Scene, VisionStatus
 from bmo_contracts.topics import VISION_CONTEXT, VISION_STATUS, VISION_CMD
 from brain.vision_intent import vision_target
-from brain.emotions import strip_emotion_tag
+from brain.emotions import EmotionTagStreamFilter, strip_emotion_tag
+from brain.memory_extract import apply_memory_effects
 from brain.tools.registry import needs_tools
 
 warnings.filterwarnings("ignore", category=FutureWarning, module="torch")
@@ -37,7 +39,8 @@ logger = logging.getLogger(__name__)
 
 # Component processes
 _broker_proc = None
-_cv_thread = None
+_cv_proc = None
+_cv_log_file = None
 _brain_thread = None
 _text_thread = None
 _scene_sub_client = None
@@ -165,44 +168,63 @@ def request_vision(scene_cache, target: str = "both", seconds: float = 6.0, time
     logger.warning("No %s in fresh scene within %.1fs; answering with last known scene", target, timeout_s)
 
 
-def run_cv_pipeline():
-    """Run the CV pipeline in a thread with output redirected to log file."""
-    import os
-    import sys
-    from contextlib import redirect_stdout, redirect_stderr
+def start_cv_process() -> None:
+    """Start the CV pipeline as a separate process.
+
+    Running it out-of-process keeps its chatty startup (and OpenCV/GTK) from
+    touching this process's stdout/window loop, and lets the on-demand camera
+    window live on the CV process's main thread.
+    """
+    global _cv_proc, _cv_log_file
 
     log_dir = Path(__file__).parent / "logs"
     log_dir.mkdir(exist_ok=True)
     cv_log_path = log_dir / "cv_pipeline.log"
+    _cv_log_file = open(cv_log_path, "a", encoding="utf-8")
 
-    logger.info("Starting CV pipeline (output -> %s)", cv_log_path)
+    cmd = [
+        sys.executable,
+        "-m",
+        "assistant_cv.main",
+        "--headless",
+        "--mqtt-host",
+        "127.0.0.1",
+        "--mqtt-port",
+        "1883",
+    ]
+    logger.info("Starting CV process (output -> %s)", cv_log_path)
+    try:
+        _cv_proc = subprocess.Popen(
+            cmd,
+            cwd=str(Path(__file__).parent),
+            stdout=_cv_log_file,
+            stderr=subprocess.STDOUT,
+            env=os.environ.copy(),
+        )
+    except Exception as exc:
+        logger.error("Failed to start CV process: %s", exc)
+        _cv_proc = None
 
-    with open(cv_log_path, "a") as log_file:
-        with redirect_stdout(log_file), redirect_stderr(log_file):
+
+def stop_cv_process() -> None:
+    global _cv_proc, _cv_log_file
+    proc = _cv_proc
+    _cv_proc = None
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.terminate()
+            proc.wait(timeout=5.0)
+        except Exception:
             try:
-                from assistant_cv.main import run_pipeline
-
-                cv_logger = logging.getLogger("assistant_cv")
-                cv_logger.setLevel(logging.WARNING)
-                cv_logger.propagate = False
-
-                for name in ["ultralytics", "cv2", "torch", "PIL"]:
-                    l = logging.getLogger(name)
-                    l.setLevel(logging.WARNING)
-                    l.propagate = False
-
-                run_pipeline(
-                    cam_index=0,
-                    headless=True,
-                    enable_mqtt=True,
-                    mqtt_host="127.0.0.1",
-                    mqtt_port=1883,
-                    lazy=True,
-                )
-            except Exception as e:
-                logger.error("CV pipeline error: %s", e)
-            finally:
-                logger.info("CV pipeline stopped")
+                proc.kill()
+            except Exception:
+                pass
+    if _cv_log_file is not None:
+        try:
+            _cv_log_file.close()
+        except Exception:
+            pass
+        _cv_log_file = None
 
 
 def run_brain_voice(scene_cache) -> None:
@@ -220,6 +242,8 @@ def run_brain_voice(scene_cache) -> None:
         from brain.prompt import PromptBuilder
         from brain.tools.registry import ToolRegistry
         from brain.tools.scene_tools import register_scene_tools
+        from brain.tools.memory_tools import register_memory_tools
+        from brain.memory import LongTermMemory
         from brain.turn import TurnManager
         from brain.settings import load_settings
         from pathlib import Path
@@ -270,13 +294,16 @@ def run_brain_voice(scene_cache) -> None:
         except Exception as exc:
             logger.warning("LLM prewarm failed: %s", exc)
 
+        memory = LongTermMemory(Path(__file__).parent / "data" / "memory.json")
         prompt_builder = PromptBuilder(
             scene_cache,
             max_turns=llm_settings.history_turns,
             max_total_tokens=max(1024, llm_settings.num_ctx - 1024),
+            memory=memory,
         )
         tools = ToolRegistry()
         register_scene_tools(tools, scene_cache)
+        register_memory_tools(tools, memory)
 
         audio_sink = SoundDeviceSink(audio_settings.sample_rate, device=audio_device)
 
@@ -414,6 +441,14 @@ def run_text_input(turn_manager) -> None:
             break
 
         try:
+            memory = getattr(turn_manager._prompt_builder, "memory", None)
+            if memory is not None:
+                try:
+                    for note in apply_memory_effects(text, memory):
+                        logger.info("memory: %s", note)
+                except Exception as exc:
+                    logger.warning("memory update failed: %s", exc)
+
             # Ask CV for a fresh look before answering camera questions,
             # enabling only the models relevant to the question.
             target = vision_target(text)
@@ -423,12 +458,11 @@ def run_text_input(turn_manager) -> None:
                 except Exception as exc:
                     logger.warning("Vision request failed: %s", exc)
 
-            # Stream LLM response immediately for text mode, hiding the
-            # leading [emotion] tag (it is never spoken or shown).
+            # Stream LLM response immediately for text mode, stripping every
+            # [emotion] tag (the model sometimes emits one per sentence).
             print("bmo: ", end="", flush=True, file=stdout)
             full_reply = []
-            head = ""
-            tag_done = False
+            tag_filter = EmotionTagStreamFilter()
             printed_any = False
 
             def _emit(piece: str) -> None:
@@ -452,20 +486,8 @@ def run_text_input(turn_manager) -> None:
                 if not chunk.text:
                     continue
                 full_reply.append(chunk.text)
-                if tag_done:
-                    _emit(chunk.text)
-                    continue
-                head += chunk.text
-                match = re.match(r"^\s*\[[a-zA-Z_]+\]\s*", head)
-                if match:
-                    head = head[match.end():]
-                    tag_done = True
-                    _emit(head)
-                elif len(head) >= 24:
-                    tag_done = True
-                    _emit(head)
-            if not tag_done and head:
-                _emit(head)
+                _emit(tag_filter.feed(chunk.text))
+            _emit(tag_filter.flush())
             print(flush=True, file=stdout)
 
             reply_text = strip_emotion_tag("".join(full_reply))
@@ -515,10 +537,8 @@ def main():
     # Start MQTT scene subscriber (CV -> brain scene cache, most recent frame only)
     start_scene_subscriber(scene_cache)
 
-    # 2. Start CV Pipeline (in background thread)
-    global _cv_thread
-    _cv_thread = threading.Thread(target=run_cv_pipeline, daemon=True, name="CV-Pipeline")
-    _cv_thread.start()
+    # 2. Start CV Pipeline (separate process)
+    start_cv_process()
 
     # Give CV time to connect to broker
     time.sleep(3)
@@ -539,6 +559,7 @@ def main():
         _shutdown.set()
         stop_scene_subscriber()
         stop_mqtt_broker()
+        stop_cv_process()
 
 
 if __name__ == "__main__":

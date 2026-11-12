@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+from collections.abc import Mapping
 import pathlib
 import sys
 import threading
@@ -79,6 +80,11 @@ except ImportError:
     from memory import PersonFaceSynchronizer, ShortTermMemory, get_proximity, get_screen_position
     from mqtt_bridge import MQTTBridge
     from objects import get_detector
+
+
+# Hands/sign recognition is intentionally disabled for now: BMO only cares
+# about people and objects. Flip to True to bring the sign modules back.
+SIGN_ENABLED = False
 
 
 # ---------------------------------------------------------------------------
@@ -596,9 +602,13 @@ def run_pipeline(
     face_worker = AsyncFaceWorker()
     face_worker.start()
 
-    print("[3/4] Initializing Event-Driven Async Sign Worker...")
-    sign_worker = AsyncSignWorker()
-    sign_worker.start()
+    if SIGN_ENABLED:
+        print("[3/4] Initializing Event-Driven Async Sign Worker...")
+        sign_worker = AsyncSignWorker()
+        sign_worker.start()
+    else:
+        print("[3/4] Sign worker disabled (people/objects only)")
+        sign_worker = None
 
     print("[4/4] Initializing Person-Face Synchronizer & Short-Term Memory...")
     synchronizer = PersonFaceSynchronizer(registry=face_worker.identifier.registry)
@@ -614,7 +624,7 @@ def run_pipeline(
     toggles = {
         "1:OBJ": True,
         "2:FACE": True,
-        "3:SIGN": True,
+        "3:SIGN": False,
         "L:LAZY": lazy,
         "T:TRK": True,  # Keep tracking enabled for person track IDs
     }
@@ -623,7 +633,8 @@ def run_pipeline(
     if not camera.is_opened():
         print(f"[ERROR] Failed to open camera device /dev/video{cam_index}.", file=sys.stderr)
         face_worker.stop()
-        sign_worker.stop()
+        if sign_worker is not None:
+            sign_worker.stop()
         if mqtt_bridge:
             mqtt_bridge.stop()
         return {"error": "Camera open failure"}
@@ -646,6 +657,11 @@ def run_pipeline(
     vision_grace_until: float = 0.0
     # What the current look is focused on: "people", "objects", or "both".
     vision_target_kind: str | None = None
+    # On-demand camera window: the pipeline is headless, but a "look" request
+    # pops up the live HUD for the duration of the look.
+    show_window: bool = False
+    show_window_until: float = 0.0
+    window_opened: bool = False
 
     print("\nInteractive Hotkeys:")
     print("  1 / 2 / 3 : Toggle Objects, Face ID, or Sign Language modules")
@@ -711,7 +727,7 @@ def run_pipeline(
                         if "face" in args_dict:
                             toggles["2:FACE"] = bool(args_dict["face"])
                         if "sign" in args_dict:
-                            toggles["3:SIGN"] = bool(args_dict["sign"])
+                            toggles["3:SIGN"] = bool(args_dict["sign"]) and SIGN_ENABLED
                         if contract_id:
                             mqtt_bridge.publish_cmd_result(str(contract_id), True, "modules_updated")
                         else:
@@ -727,7 +743,8 @@ def run_pipeline(
                             toggles["L:LAZY"] = True
                         elif new_mode in ("all", "active"):
                             toggles["L:LAZY"] = False
-                            toggles["1:OBJ"] = toggles["2:FACE"] = toggles["3:SIGN"] = True
+                            toggles["1:OBJ"] = toggles["2:FACE"] = True
+                            toggles["3:SIGN"] = False
                         elif new_mode == "idle":
                             toggles["2:FACE"] = toggles["3:SIGN"] = False
                         mqtt_bridge.publish_response(cmd_type, "applied", {"mode": new_mode}, req_id)
@@ -754,6 +771,9 @@ def run_pipeline(
                             toggles["2:FACE"] = True
                         cached_detections = []
                         last_scene_sig = None  # force a publish once detection runs
+                        show_window = True
+                        show_window_until = time.monotonic() + max(8.0, seconds + 2.0)
+                        print(f"[WINDOW] live camera view opened for {max(8.0, seconds + 2.0):.0f}s (target={target})", flush=True)
                         events_log.append(f"Vision active for {seconds:.0f}s (target={target})")
                         mqtt_bridge.publish_response(
                             cmd_type, "success", {"seconds": seconds, "target": target}, req_id
@@ -1036,6 +1056,40 @@ def run_pipeline(
 
             faces, face_lat, enroll_info = face_worker.get_results() if toggles["2:FACE"] else ([], 0.0, None)
 
+            # Fallback for close-up faces: YOLO sometimes misses a person when
+            # only their face fills the frame. Treat a detected face as a
+            # person so the scene still reports who is there.
+            if (
+                toggles["2:FACE"]
+                and faces
+                and vision_target_kind in ("people", "both")
+                and not any(str(d.get("label", "")).lower() == "person" for d in detections)
+            ):
+                face = faces[0]
+                if isinstance(face, Mapping):
+                    fconf = float(face.get("score", face.get("conf", 0.0)))
+                    fbox = tuple(map(int, face.get("bbox", (0, 0, 0, 0))))
+                else:
+                    fconf = float(face[1])
+                    fbox = tuple(map(int, face[2]))
+                fx1, fy1, fx2, fy2 = fbox
+                if fx2 > fx1 and fy2 > fy1:
+                    fw, fh = fx2 - fx1, fy2 - fy1
+                    pad_x = int(fw * 0.7)
+                    bx1 = max(0, fx1 - pad_x)
+                    bx2 = min(frame.shape[1], fx2 + pad_x)
+                    by1 = max(0, fy1 - int(fh * 0.4))
+                    by2 = min(frame.shape[0], fy2 + int(fh * 2.6))
+                    detections.append(
+                        {
+                            "label": "person",
+                            "bbox": (bx1, by1, bx2, by2),
+                            "conf": fconf,
+                            "id": None,
+                            "source": "face_fallback",
+                        }
+                    )
+
             # Check if auto-enroll finished
             if auto_enroll_session is not None:
                 if auto_enroll_session.completed:
@@ -1089,12 +1143,14 @@ def run_pipeline(
             # ---------------------------------------------------------------
             # 4. Sign Language Orchestrator (Lazy Probe or Continuous)
             # ---------------------------------------------------------------
-            if toggles["3:SIGN"]:
+            if SIGN_ENABLED and sign_worker is not None and toggles["3:SIGN"]:
                 force_sign = not toggles["L:LAZY"]
                 sign_worker.submit_frame(frame, person_present=person_present, force=force_sign)
 
             active_sign, active_conf, buf_len, raw_hands, sign_lat, sign_mode = (
-                sign_worker.get_results() if toggles["3:SIGN"] else (None, 0.0, 0, None, 0.0, "OFF")
+                sign_worker.get_results()
+                if SIGN_ENABLED and sign_worker is not None and toggles["3:SIGN"]
+                else (None, 0.0, 0, None, 0.0, "OFF")
             )
 
             # ---------------------------------------------------------------
@@ -1172,14 +1228,29 @@ def run_pipeline(
                 },
             }
 
-            if not headless:
+            display_active = (not headless) or show_window
+            if display_active:
                 display_frame = frame.copy()
                 hud.render_hud(display_frame, state, events=events_log, toggles=toggles)
-                cv.imshow("BMO Vision Suite", display_frame)
+                try:
+                    cv.imshow("BMO Vision Suite", display_frame)
+                    window_opened = True
+                except Exception as exc:
+                    print(f"[WARN] Camera window unavailable: {exc}", flush=True)
+                    show_window = False
+                    display_active = False
 
+            if display_active:
                 k = cv.waitKey(1) & 0xFF
                 if k in (27, ord("q")):
-                    break
+                    if headless:
+                        show_window = False
+                        try:
+                            cv.destroyWindow("BMO Vision Suite")
+                        except Exception:
+                            pass
+                    else:
+                        break
                 elif k == ord("1"):
                     toggles["1:OBJ"] = not toggles["1:OBJ"]
                     events_log.append(f"Objects: {'ON' if toggles['1:OBJ'] else 'OFF'}")
@@ -1187,8 +1258,11 @@ def run_pipeline(
                     toggles["2:FACE"] = not toggles["2:FACE"]
                     events_log.append(f"Face ID: {'ON' if toggles['2:FACE'] else 'OFF'}")
                 elif k == ord("3"):
-                    toggles["3:SIGN"] = not toggles["3:SIGN"]
-                    events_log.append(f"Sign Lang: {'ON' if toggles['3:SIGN'] else 'OFF'}")
+                    if SIGN_ENABLED:
+                        toggles["3:SIGN"] = not toggles["3:SIGN"]
+                        events_log.append(f"Sign Lang: {'ON' if toggles['3:SIGN'] else 'OFF'}")
+                    else:
+                        events_log.append("Sign Lang: disabled")
                 elif k in (ord("l"), ord("L")):
                     toggles["L:LAZY"] = not toggles["L:LAZY"]
                     events_log.append(f"Lazy Mode: {'ON' if toggles['L:LAZY'] else 'OFF'}")
@@ -1221,6 +1295,14 @@ def run_pipeline(
                     synchronizer.flag_for_recheck()
                     events_log.append("Forced face re-check for active tracks")
 
+            if headless and show_window and time.monotonic() > show_window_until:
+                show_window = False
+                print("[WINDOW] closing live camera view", flush=True)
+                try:
+                    cv.destroyWindow("BMO Vision Suite")
+                except Exception:
+                    pass
+
             # Enforce 60 FPS cap
             cycle_elapsed = time.perf_counter() - t_cycle_start
             sleep_needed = (1.0 / MAX_FPS) - cycle_elapsed
@@ -1237,12 +1319,16 @@ def run_pipeline(
         print(f"  Session Finished: {frame_count} frames in {total_time:.2f}s ({avg_fps:.1f} FPS)")
         print("=" * 68)
         face_worker.stop()
-        sign_worker.stop()
+        if sign_worker is not None:
+            sign_worker.stop()
         camera.release()
         if mqtt_bridge is not None:
             mqtt_bridge.stop()
-        if not headless:
-            cv.destroyAllWindows()
+        if window_opened or not headless:
+            try:
+                cv.destroyAllWindows()
+            except Exception:
+                pass
 
     return {
         "frames": frame_count,
