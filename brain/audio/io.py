@@ -254,6 +254,8 @@ class SoundDeviceSink:
         self.sample_rate = sample_rate
         self.device = device
         self._stream: sd.OutputStream | None = None
+        self._written_samples = 0
+        self._played_samples = 0
 
     def write_samples(self, pcm: np.ndarray | bytes) -> None:
         arr = to_int16(pcm)
@@ -268,6 +270,18 @@ class SoundDeviceSink:
             )
             self._stream.start()
         self._stream.write(arr)
+        self._written_samples += len(arr)
+
+    def drain(self) -> None:
+        """Wait for all written audio to finish playing."""
+        if self._stream is not None:
+            try:
+                # Wait for the stream to finish playing all queued audio
+                while self._stream.active:
+                    sd.sleep(10)
+            except Exception:
+                # Stream might be invalid, ignore
+                pass
 
     def stop(self) -> None:
         if self._stream is not None:

@@ -321,14 +321,20 @@ def run_text_input(turn_manager) -> None:
                     full_reply.append(chunk.text)
             print(flush=True, file=stdout)
             
+            reply_text = "".join(full_reply)
+            
             # Optionally speak the response via TTS
-            if use_tts and tts is not None and sink is not None:
-                reply_text = "".join(full_reply)
-                if reply_text.strip():
+            if use_tts and tts is not None and sink is not None and reply_text.strip():
+                try:
                     tts.speak_sentence(reply_text, sink)
+                    # Wait for audio to finish playing
+                    if hasattr(sink, 'drain'):
+                        sink.drain()
+                except Exception as tts_exc:
+                    logger.error("TTS failed: %s", tts_exc)
             
             # Record turn in history
-            turn_manager._prompt_builder.record_turn(text, "".join(full_reply))
+            turn_manager._prompt_builder.record_turn(text, reply_text)
         except Exception as exc:
             logger.error("Text input turn failed: %s", exc)
 
