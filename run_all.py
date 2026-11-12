@@ -20,7 +20,7 @@ import paho.mqtt.client as mqtt
 
 from bmo_contracts.models import Scene, VisionStatus
 from bmo_contracts.topics import VISION_CONTEXT, VISION_STATUS, VISION_CMD
-from brain.vision_intent import is_vision_intent
+from brain.vision_intent import vision_target
 
 warnings.filterwarnings("ignore", category=FutureWarning, module="torch")
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="sounddevice")
@@ -39,6 +39,9 @@ _brain_thread = None
 _text_thread = None
 _scene_sub_client = None
 _shutdown = threading.Event()
+# Set while text-mode TTS is playing so the mic does not transcribe our own voice.
+_tts_active = threading.Event()
+_tts_quiet_until = 0.0
 
 
 def start_mqtt_broker():
@@ -117,18 +120,31 @@ def stop_scene_subscriber() -> None:
         _scene_sub_client = None
 
 
-def request_vision(scene_cache, seconds: float = 6.0, timeout_s: float = 4.0) -> None:
-    """Ask the CV pipeline to do a fresh detection pass, then wait for it.
+def _scene_has_target(scene, target: str) -> bool:
+    if scene is None:
+        return False
+    people = getattr(scene, "people", None) or []
+    objects = getattr(scene, "objects", None) or []
+    if target in ("people", "person", "face"):
+        return len(people) > 0
+    if target in ("objects", "object", "thing", "item"):
+        return len(objects) > 0
+    return len(people) > 0 or len(objects) > 0
+
+
+def request_vision(scene_cache, target: str = "both", seconds: float = 6.0, timeout_s: float = 4.0) -> None:
+    """Ask the CV pipeline to look for a specific target, then wait for it.
 
     CV runs idle (no object detection) by default to keep the CPU free. A
-    vision question enables the heavy models for a few seconds via MQTT and we
-    block briefly until the scene cache receives a newer frame.
+    vision question enables only the relevant models (people or objects) for a
+    few seconds via MQTT. We wait for a scene that actually contains the
+    requested kind of thing (so we do not answer from a premature empty frame).
     """
     client = _scene_sub_client
     if client is None:
         return
     before = scene_cache.last_update_time()
-    payload = json.dumps({"command": "look", "args": {"seconds": seconds}})
+    payload = json.dumps({"command": "look", "args": {"seconds": seconds, "target": target}})
     try:
         client.publish(VISION_CMD, payload, qos=1)
     except Exception as exc:
@@ -138,10 +154,12 @@ def request_vision(scene_cache, seconds: float = 6.0, timeout_s: float = 4.0) ->
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline and not _shutdown.is_set():
         if scene_cache.last_update_time() > before:
-            logger.info("Fresh scene received for vision query")
-            return
+            scene = scene_cache.current()
+            if _scene_has_target(scene, target):
+                logger.info("Fresh %s scene received for vision query", target)
+                return
         time.sleep(0.05)
-    logger.warning("No fresh scene within %.1fs; answering with last known scene", timeout_s)
+    logger.warning("No %s in fresh scene within %.1fs; answering with last known scene", target, timeout_s)
 
 
 def run_cv_pipeline():
@@ -242,9 +260,12 @@ def run_brain_voice(scene_cache) -> None:
         tts = TextToSpeech(audio_settings, model_path=PIPER_VOICE_PATH)
 
         llm = LLMClient(llm_settings)
-        # Model loads lazily on first chat() call (in the worker thread),
-        # avoiding CUDA context thread-affinity issues from pre-warming on
-        # the main thread.
+        # Load the model now (same thread as voice turns) so the first spoken
+        # reply does not pay the multi-second load cost.
+        try:
+            llm.prewarm()
+        except Exception as exc:
+            logger.warning("LLM prewarm failed: %s", exc)
 
         prompt_builder = PromptBuilder(
             scene_cache,
@@ -275,7 +296,7 @@ def run_brain_voice(scene_cache) -> None:
             tts=tts,
             sink=audio_sink,
             publish_fn=lambda t, p, q, r: None,
-            vision_request_fn=lambda: request_vision(scene_cache),
+            vision_request_fn=lambda target: request_vision(scene_cache, target=target),
         )
 
         source = SoundDeviceSource(audio_settings.sample_rate)
@@ -306,6 +327,11 @@ def run_brain_voice(scene_cache) -> None:
                 logger.warning("VAD collect_utterance failed: %s", exc)
                 continue
             if pcm is None or _shutdown.is_set():
+                continue
+
+            # Ignore audio captured while (or just after) our own TTS plays.
+            if _tts_active.is_set() or time.monotonic() < _tts_quiet_until:
+                print("  (ignored own audio)", flush=True)
                 continue
 
             stt_res = stt.transcribe(pcm)
@@ -385,10 +411,12 @@ def run_text_input(turn_manager) -> None:
             break
 
         try:
-            # Ask CV for a fresh look before answering camera questions.
-            if is_vision_intent(text) and turn_manager._vision_request_fn is not None:
+            # Ask CV for a fresh look before answering camera questions,
+            # enabling only the models relevant to the question.
+            target = vision_target(text)
+            if target and turn_manager._vision_request_fn is not None:
                 try:
-                    turn_manager._vision_request_fn()
+                    turn_manager._vision_request_fn(target)
                 except Exception as exc:
                     logger.warning("Vision request failed: %s", exc)
 
@@ -396,7 +424,7 @@ def run_text_input(turn_manager) -> None:
             print("bmo: ", end="", flush=True, file=stdout)
             full_reply = []
             for chunk in turn_manager._llm.chat(
-                turn_manager._prompt_builder.build_messages(text),
+                turn_manager._prompt_builder.build_messages(text, scene_target=target),
                 tools=turn_manager._tools.ollama_tools(),
                 stream=True,
                 cancel_event=turn_manager.cancel_event,
@@ -411,6 +439,8 @@ def run_text_input(turn_manager) -> None:
             # Optionally speak the response via TTS
             if use_tts and tts is not None and sink is not None and reply_text.strip():
                 logger.info("Text input TTS: speaking reply (%d chars)", len(reply_text))
+                global _tts_quiet_until
+                _tts_active.set()
                 try:
                     tts.speak_sentence(reply_text, sink)
                     # Wait for audio to finish playing
@@ -419,6 +449,9 @@ def run_text_input(turn_manager) -> None:
                     logger.info("Text input TTS: completed")
                 except Exception as tts_exc:
                     logger.error("TTS failed: %s", tts_exc, exc_info=True)
+                finally:
+                    _tts_active.clear()
+                    _tts_quiet_until = time.monotonic() + 0.8
             
             # Record turn in history
             turn_manager._prompt_builder.record_turn(text, reply_text)

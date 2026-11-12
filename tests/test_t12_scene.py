@@ -114,7 +114,7 @@ def test_scene_cache_staleness() -> None:
     fake_time += 10.5
     assert cache.is_stale() is True
     assert cache.current() is None
-    assert cache.as_prompt_line() == "Camera: offline/stale"
+    assert cache.as_prompt_line() == "Camera: no fresh view available"
 
 
 def test_scene_cache_offline_status() -> None:
@@ -138,7 +138,7 @@ def test_scene_cache_offline_status() -> None:
     assert cache.is_online() is False
     assert cache.is_stale() is True
     assert cache.current() is None
-    assert cache.as_prompt_line() == "Camera: offline/stale"
+    assert cache.as_prompt_line() == "Camera: no fresh view available"
 
 
 def test_scene_cache_concurrency() -> None:

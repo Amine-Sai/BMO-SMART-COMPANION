@@ -641,6 +641,11 @@ def run_pipeline(
     # In lazy mode the heavy detectors stay off until the brain requests a
     # "look". This timestamp keeps them active for a short window.
     vision_active_until: float = 0.0
+    # Give freshly-enabled detectors a moment to produce results before
+    # publishing (otherwise we publish an empty scene the instant "look" lands).
+    vision_grace_until: float = 0.0
+    # What the current look is focused on: "people", "objects", or "both".
+    vision_target_kind: str | None = None
 
     print("\nInteractive Hotkeys:")
     print("  1 / 2 / 3 : Toggle Objects, Face ID, or Sign Language modules")
@@ -732,14 +737,26 @@ def run_pipeline(
                             seconds = float(args_dict.get("seconds", cmd.get("seconds", 6.0)))
                         except (TypeError, ValueError):
                             seconds = 6.0
+                        target = str(args_dict.get("target", cmd.get("target", "both"))).lower()
                         vision_active_until = time.monotonic() + max(1.0, seconds)
-                        toggles["1:OBJ"] = True
-                        toggles["2:FACE"] = True
+                        vision_grace_until = time.monotonic() + 1.5
+                        if target in ("people", "person", "face", "faces"):
+                            vision_target_kind = "people"
+                            toggles["1:OBJ"] = True
+                            toggles["2:FACE"] = True
+                        elif target in ("objects", "object", "thing", "things", "item", "items"):
+                            vision_target_kind = "objects"
+                            toggles["1:OBJ"] = True
+                            toggles["2:FACE"] = False
+                        else:
+                            vision_target_kind = "both"
+                            toggles["1:OBJ"] = True
+                            toggles["2:FACE"] = True
                         cached_detections = []
                         last_scene_sig = None  # force a publish once detection runs
-                        events_log.append(f"Vision active for {seconds:.0f}s")
+                        events_log.append(f"Vision active for {seconds:.0f}s (target={target})")
                         mqtt_bridge.publish_response(
-                            cmd_type, "success", {"seconds": seconds}, req_id
+                            cmd_type, "success", {"seconds": seconds, "target": target}, req_id
                         )
 
                     elif cmd_type == "status":
@@ -913,9 +930,10 @@ def run_pipeline(
                 )
                 if run_det:
                     t_obj0 = time.perf_counter()
+                    persons_only = vision_active and vision_target_kind == "people"
                     detections = obj_detector.detect(
                         frame,
-                        persons_only=False,
+                        persons_only=persons_only,
                         track=toggles["T:TRK"],
                     )
                     obj_latency = (time.perf_counter() - t_obj0) * 1000.0
@@ -955,6 +973,10 @@ def run_pipeline(
 
             # Use fused detections for downstream processing
             detections = fused_detections
+            if vision_active and vision_target_kind == "objects":
+                detections = [
+                    d for d in detections if str(d.get("label", "")).lower() != "person"
+                ]
 
             # Step active object enrollment session if running
             object_enroll_info: dict[str, Any] | None = None
@@ -1116,7 +1138,9 @@ def run_pipeline(
                     has_content = bool(scene_contract["people"]) or bool(scene_contract["objects"])
                     # While idle, keep the last real scene instead of replacing
                     # it with empty detections; only active looks publish blanks.
-                    if has_content or vision_active or not toggles["L:LAZY"]:
+                    # During the look grace period, wait for detectors to fill in.
+                    still_grace = time.monotonic() < vision_grace_until and not has_content
+                    if not still_grace and (has_content or vision_active or not toggles["L:LAZY"]):
                         mqtt_bridge.publish_scene(scene_contract)
                         last_scene_sig = scene_sig
                         last_scene_pub_time = now_sec

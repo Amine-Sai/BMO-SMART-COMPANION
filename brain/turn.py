@@ -20,7 +20,7 @@ from brain.prompt import PromptBuilder
 from brain.state import BrainState, BrainStateMachine
 from brain.stream import SentenceSplitter
 from brain.tools.registry import ToolRegistry
-from brain.vision_intent import is_vision_intent
+from brain.vision_intent import vision_target
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,7 @@ class TurnManager:
         sink: AudioSink,
         publish_fn: Callable[[str, bytes, int, bool], None] | None = None,
         on_turn_metrics: Callable[[dict[str, float]], None] | None = None,
-        vision_request_fn: Callable[[], None] | None = None,
+        vision_request_fn: Callable[[str], None] | None = None,
         clock: Callable[[], float] = time.perf_counter,
     ) -> None:
         self._state_machine = state_machine
@@ -218,14 +218,15 @@ class TurnManager:
         vad_end_ts: float | None = None,
         stt_ms: float = 0.0,
     ) -> str:
-        if self._vision_request_fn is not None and is_vision_intent(user_text):
+        vision_target_kind = vision_target(user_text)
+        if self._vision_request_fn is not None and vision_target_kind:
             try:
-                logger.info("Vision intent detected; requesting fresh camera look")
-                self._vision_request_fn()
+                logger.info("Vision intent (%s); requesting fresh camera look", vision_target_kind)
+                self._vision_request_fn(vision_target_kind)
             except Exception as exc:
                 logger.warning("Vision request failed: %s", exc)
 
-        messages = self._prompt_builder.build_messages(user_text)
+        messages = self._prompt_builder.build_messages(user_text, scene_target=vision_target_kind)
 
         t_turn_start = self._clock()
         t_llm_start = self._clock()

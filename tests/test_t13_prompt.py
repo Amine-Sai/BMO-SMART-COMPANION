@@ -65,9 +65,11 @@ def test_scene_cache_prompt_injection() -> None:
     cache = _make_scene_cache()
     builder = PromptBuilder(scene_cache=cache)
 
+    # Non-vision questions must not include the camera scene.
     msgs = builder.build_messages("Hello BMO")
-    assert "Scene: Camera: offline/stale" in msgs[0]["content"]
+    assert "Scene:" not in msgs[0]["content"]
 
     cache.as_prompt_line = Mock(return_value="Camera: 1 person (Alice, 1.2m, waving), 1 cup")
-    msgs_online = builder.build_messages("What do you see?")
+    msgs_online = builder.build_messages("What do you see?", scene_target="both")
     assert "Scene: Camera: 1 person (Alice, 1.2m, waving), 1 cup" in msgs_online[0]["content"]
+    cache.as_prompt_line.assert_called_with(target="both")

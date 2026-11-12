@@ -174,6 +174,7 @@ class LlamaCppBackend:
         self._s = s
         self._llm: Llama | None = None
         self._model_path = s.host  # reuse host field for model path
+        self._decode_lock = threading.Lock()
 
     def _load(self) -> Llama:
         if self._llm is None:
@@ -238,6 +239,17 @@ class LlamaCppBackend:
             )
 
     def chat(
+        self,
+        messages: MsgList,
+        tools: MsgList | None = None,
+        stream: bool = True,
+        cancel_event: CancelEvt = None,
+    ) -> Iterator[ChatChunk]:
+        # Serialize decodes: the text thread and voice thread share one model.
+        with self._decode_lock:
+            yield from self._chat_impl(messages, tools, stream, cancel_event)
+
+    def _chat_impl(
         self,
         messages: MsgList,
         tools: MsgList | None = None,

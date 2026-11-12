@@ -233,7 +233,7 @@ class TestSecurityAndFailureInjection(unittest.TestCase):
         self.assertFalse(self.scene_cache.is_online())
         self.assertTrue(self.scene_cache.is_stale())
         self.assertIsNone(self.scene_cache.current())
-        self.assertEqual(self.scene_cache.as_prompt_line(), "Camera: offline/stale")
+        self.assertEqual(self.scene_cache.as_prompt_line(), "Camera: no fresh view available")
 
     def test_failure_injection_empty_stt_yields_none(self) -> None:
         """Empty or silent audio transcriptions cleanly abort turn without speaking."""

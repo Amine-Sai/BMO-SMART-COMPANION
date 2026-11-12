@@ -37,13 +37,13 @@ def test_load_settings_loads_llm_yaml() -> None:
     assert settings.llm.backend == "llamacpp"
     assert settings.llm.model == "Qwen3.5-4B-Q4_K_M.gguf"
     assert settings.llm.host == "models/Qwen3.5-4B-Q4_K_M.gguf"
-    assert settings.llm.num_ctx == 2048
+    assert settings.llm.num_ctx == 4096
     assert settings.llm.keep_alive == "5m"
     assert settings.llm.timeout_s == 30.0
     assert settings.llm.temperature == 0.7
-    assert settings.llm.n_gpu_layers == 20
+    assert settings.llm.n_gpu_layers == -1
     assert settings.llm.use_flash_attn is False
-    assert settings.llm.n_threads == 4
+    assert settings.llm.n_threads == 8
 
 
 def test_settings_is_frozen_and_rejects_mutation() -> None:

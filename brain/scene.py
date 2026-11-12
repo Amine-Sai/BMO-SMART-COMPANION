@@ -171,10 +171,10 @@ class SceneCache:
                 return None
             return self._scene
 
-    def as_prompt_line(self) -> str:
+    def as_prompt_line(self, target: str | None = None) -> str:
         with self._lock:
             if not self._online or self.is_stale() or self._scene is None:
-                return "Camera: offline/stale"
+                return "Camera: no fresh view available"
             scene = self._scene
 
         raw_people = _get_field(scene, "people", "persons")
@@ -200,6 +200,16 @@ class SceneCache:
             recent_list = [str(r) for r in raw_recent if r]
         elif raw_recent:
             recent_list = [str(raw_recent)]
+
+        # Only surface the fields the user actually asked about.
+        if target in ("people", "person", "face"):
+            objects_list = []
+            sign_str = "none"
+            recent_list = []
+        elif target in ("objects", "object", "thing", "item"):
+            people_list = []
+            sign_str = "none"
+            recent_list = []
 
         def render(p_items: list[str], o_items: list[str], s_val: str, r_items: list[str]) -> str:
             p_str = ", ".join(p_items) if p_items else "none"

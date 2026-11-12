@@ -20,7 +20,7 @@ class _Prompt(PromptBuilder):
     def __init__(self) -> None:
         pass
 
-    def build_messages(self, user_text: str) -> list[dict[str, Any]]:
+    def build_messages(self, user_text: str, scene_target=None) -> list[dict[str, Any]]:
         return [{"role": "user", "content": user_text}]
 
     def record_turn(self, user_text: str, assistant_text: str) -> None:

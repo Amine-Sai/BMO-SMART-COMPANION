@@ -11,11 +11,24 @@ from brain.settings import AudioSettings
 
 
 # openWakeWord has no "hey bmo" model, so wake detection reuses the STT engine.
-# Whisper commonly renders "BMO" as bmo / beemo / bimo / "be mo" / "b m o".
-_WAKE_PREFIXES = r"(?:hey|hi|hay|hello|okay|ok|yo)"
-_BMO_VARIANTS = r"(?:b[\s.\-]*m[\s.\-]*o|beemo|bimo|be\s*mo|b\s*e\s*m\s*o)"
+# Whisper renders "BMO" in many ways: bmo / beemo / bemo / bimo / "be mo" /
+# "b m o" / "be more" / vmo / pmo. Accept the wake word with or without a
+# greeting prefix.
+_WAKE_PREFIXES = r"(?:hey|hi|hay|hello|okay|ok|yo|o)"
+_BMO_VARIANTS = (
+    r"(?:"
+    r"b[\s.\-]*m[\s.\-]*o"
+    r"|p[\s.\-]*m[\s.\-]*o"
+    r"|v[\s.\-]*m[\s.\-]*o"
+    r"|be+[\s.\-]*mo"
+    r"|bi+mo"
+    r"|be+mer"
+    r"|be+amer"
+    r"|bma"
+    r")"
+)
 _WAKE_RE = re.compile(
-    rf"\b{_WAKE_PREFIXES}\b[\s,.!?]*\b{_BMO_VARIANTS}\b",
+    rf"(?:\b{_WAKE_PREFIXES}\b[\s,.!?]*)?\b{_BMO_VARIANTS}\b",
     re.IGNORECASE,
 )
 

@@ -7,8 +7,10 @@ _LLM_DEFAULTS = LLMSettings()
 BMO_SYSTEM_PROMPT = (
     "You are BMO, a warm and curious robot friend. "
     "Always speak in one or two short spoken sentences. "
-    "Rely strictly on the provided camera scene line and never invent people, objects, or signs not listed. "
-    'If the camera line says "Camera: offline/stale", state clearly that you cannot see right now. '
+    "Only discuss the camera or what you can see when the user explicitly asks; "
+    "otherwise never mention seeing, the camera, or the room. "
+    "When a Scene line is present, rely strictly on it and never invent people, objects, or signs. "
+    "If the Scene line says no fresh view, briefly say you could not get a clear look. "
     "Always ask for explicit confirmation before calling forget_person. "
     "Speak in plain English only, without lists or special formatting."
 )
@@ -65,11 +67,11 @@ class PromptBuilder:
     def record_turn(self, user_text: str, assistant_text: str) -> None:
         self.history.add_turn(user_text, assistant_text)
 
-    def build_messages(self, user_text: str) -> list[dict[str, str]]:
-        system_msg = {
-            "role": "system",
-            "content": f"{self.system_prompt}\nScene: {self.scene_cache.as_prompt_line()}",
-        }
+    def build_messages(self, user_text: str, scene_target: str | None = None) -> list[dict[str, str]]:
+        content = self.system_prompt
+        if scene_target is not None:
+            content = f"{content}\nScene: {self.scene_cache.as_prompt_line(target=scene_target)}"
+        system_msg = {"role": "system", "content": content}
         user_msg = {"role": "user", "content": user_text}
         history_msgs = self.history.messages
         messages = [system_msg, *history_msgs, user_msg]

@@ -108,7 +108,7 @@ class MockPromptBuilder(PromptBuilder):
     def __init__(self) -> None:
         pass
 
-    def build_messages(self, user_text: str) -> list[dict[str, Any]]:
+    def build_messages(self, user_text: str, scene_target=None) -> list[dict[str, Any]]:
         _ = user_text
         return [{"role": "user", "content": user_text}]
 
