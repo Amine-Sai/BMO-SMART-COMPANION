@@ -21,7 +21,8 @@ DATA_DIR = BASE_DIR / "data"
 for _dir in (MODELS_DIR, GALLERY_DIR, OBJECT_GALLERY_DIR, DATA_DIR):
     _dir.mkdir(parents=True, exist_ok=True)
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+# Force CPU for CV pipeline (GTX 1660 Ti sm_75): avoid CUDA graph capture conflicts with llama-cpp LLM on same GPU
+DEVICE = "cpu"
 CAM_INDEX = int(os.environ.get("BMO_CAM", "0"))
 MAX_FPS = int(os.environ.get("BMO_MAX_FPS", "60"))
 OBJ_FRAME_STRIDE = int(os.environ.get("BMO_OBJ_STRIDE", "3"))
@@ -116,13 +117,22 @@ def _preload_cuda_dlls() -> None:
                 pass
 
 
-_preload_cuda_dlls()
-import onnxruntime  # noqa: E402
+_ONNX_PROVIDERS_CACHE: list[str] | None = None
 
 
 def get_onnx_providers() -> list[str]:
-    """Return available ONNX Runtime execution providers prioritizing CUDA."""
-    available = onnxruntime.get_available_providers()
-    if DEVICE == "cuda" and "CUDAExecutionProvider" in available:
-        return ["CUDAExecutionProvider", "CPUExecutionProvider"]
-    return ["CPUExecutionProvider"]
+    """Return available ONNX Runtime execution providers. Force CPU on Turing (sm_75) due to CUDA graph capture unsupported."""
+    global _ONNX_PROVIDERS_CACHE
+    if _ONNX_PROVIDERS_CACHE is not None:
+        return _ONNX_PROVIDERS_CACHE
+
+    try:
+        import onnxruntime
+
+        _preload_cuda_dlls()
+        available = onnxruntime.get_available_providers()
+        # Force CPUExecutionProvider on Turing (GTX 1660 Ti, sm_75) - CUDA graph capture unsupported
+        _ONNX_PROVIDERS_CACHE = ["CPUExecutionProvider"]
+    except ImportError:
+        _ONNX_PROVIDERS_CACHE = ["CPUExecutionProvider"]
+    return _ONNX_PROVIDERS_CACHE

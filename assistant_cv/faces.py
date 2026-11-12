@@ -37,7 +37,8 @@ def get_face_app() -> FaceAnalysis:
             allowed_modules=["detection", "recognition"],
             providers=get_onnx_providers(),
         )
-        app.prepare(ctx_id=0 if DEVICE == "cuda" else -1, det_size=(640, 640))
+        # Force CPU for InsightFace on Turing (sm_75) - avoid CUDA context conflicts with llama-cpp
+        app.prepare(ctx_id=-1, det_size=(640, 640))
         _FACE_APP = app
     return _FACE_APP
 
