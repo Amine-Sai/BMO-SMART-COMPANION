@@ -224,6 +224,14 @@ def run_brain_voice(scene_cache) -> None:
 
         audio_sink = SoundDeviceSink(audio_settings.sample_rate, device=audio_device)
 
+        # Debug: test TTS immediately
+        logger.info("Testing TTS at startup...")
+        try:
+            ms = tts.speak_sentence("BMO voice system ready", audio_sink)
+            logger.info("Startup TTS test completed, latency: %.1fms", ms)
+        except Exception as exc:
+            logger.error("Startup TTS test failed: %s", exc, exc_info=True)
+
         turn_manager = TurnManager(
             state_machine=state_machine,
             wake=wake,
@@ -266,8 +274,14 @@ def run_brain_voice(scene_cache) -> None:
         if turn_manager._active_thread and turn_manager._active_thread.is_alive():
             turn_manager._active_thread.join(timeout=30.0)
 
-        audio_sink.close()
-        source.close()
+        try:
+            audio_sink.close()
+        except Exception as exc:
+            logger.error("Error closing audio sink: %s", exc)
+        try:
+            source.close()
+        except Exception as exc:
+            logger.error("Error closing audio source: %s", exc)
 
     except KeyboardInterrupt:
         pass
@@ -325,13 +339,15 @@ def run_text_input(turn_manager) -> None:
             
             # Optionally speak the response via TTS
             if use_tts and tts is not None and sink is not None and reply_text.strip():
+                logger.info("Text input TTS: speaking reply (%d chars)", len(reply_text))
                 try:
                     tts.speak_sentence(reply_text, sink)
                     # Wait for audio to finish playing
                     if hasattr(sink, 'drain'):
                         sink.drain()
+                    logger.info("Text input TTS: completed")
                 except Exception as tts_exc:
-                    logger.error("TTS failed: %s", tts_exc)
+                    logger.error("TTS failed: %s", tts_exc, exc_info=True)
             
             # Record turn in history
             turn_manager._prompt_builder.record_turn(text, reply_text)
