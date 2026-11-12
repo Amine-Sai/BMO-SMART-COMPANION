@@ -281,7 +281,7 @@ class TurnManager:
                 if not first_chunk_seen:
                     first_chunk_seen = True
                     llm_ttft_ms = (self._clock() - t_llm_start) * 1000.0
-                    logger.info("First LLM token after %.1fs", llm_ttft_ms)
+                    logger.info("First LLM token after %.1fms", llm_ttft_ms)
 
                 if chunk.tool_call is not None:
                     self._tools.dispatch(chunk.tool_call, confirmed=confirmed)
