@@ -20,7 +20,7 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
 from brain.audio.io import AudioSettings, SoundDeviceSource, SoundDeviceSink
-from brain.audio.wake import WakeWordDetector
+from brain.audio.wake import WakeWordDetector, extract_wake_command
 from brain.audio.vad import VoiceActivityDetector
 from brain.audio.stt import SpeechToText
 from brain.audio.tts import TextToSpeech
@@ -37,11 +37,11 @@ from brain.settings import SceneSettings
 MODEL_PATH = Path("models/Qwen3.5-4B-Q4_K_M.gguf")
 PIPER_VOICE_PATH = Path(__file__).parent / "models/piper/bmo.onnx"
 
-# Audio settings tuned for hey_jarvis model
+# Audio settings (wake is handled via Whisper "hey bmo" detection)
 AUDIO_SETTINGS = AudioSettings(
     sample_rate=16000,
     frame_ms=20,
-    wake_threshold=0.03,      # Critical: hey_jarvis needs ~0.03
+    wake_threshold=0.03,
     vad_threshold=0.5,
     vad_min_silence_ms=1000,  # Longer silence wait after speech
     stt_model="base.en",
@@ -95,8 +95,8 @@ def main():
     print("=" * 60)
     print("  BMO VOICE ASSISTANT - Local Pipeline")
     print("=" * 60)
-    print("Wake words: hey jarvis | alexa | hey mycroft | hey rhasspy")
-    print("Say wake word, then your question. Ctrl+C to exit.")
+    print("Wake word: hey bmo")
+    print("Say 'hey bmo' then your question. Ctrl+C to exit.")
     print("=" * 60)
 
     # Verify Piper voice exists
@@ -109,7 +109,7 @@ def main():
     # Initialize components
     scene_cache = SceneCache(SceneSettings())
     state_machine = BrainStateMachine(lambda t, p, q, r: None)
-    wake = WakeWordDetector(AUDIO_SETTINGS, model_name="hey_jarvis")
+    wake = WakeWordDetector(AUDIO_SETTINGS)
     vad = VoiceActivityDetector(AUDIO_SETTINGS)
     stt = SpeechToText(AUDIO_SETTINGS)
     tts = TextToSpeech(AUDIO_SETTINGS, model_path=PIPER_VOICE_PATH)
@@ -161,27 +161,31 @@ def main():
         while True:
             source = SoundDeviceSource(AUDIO_SETTINGS.sample_rate)
             audio_sink = SoundDeviceSink(AUDIO_SETTINGS.sample_rate, device=audio_device)
-            
+
             # Update turn manager with fresh sink
             turn_manager._sink = audio_sink
-            
-            print("\n[WAITING FOR WAKE WORD...]", flush=True)
 
-            # Phase 1: Wait for wake word
-            wake_detected = False
-            while not wake_detected:
-                frame = source.read_frame()
-                if frame is None:
-                    continue
-                result = turn_manager.process_audio_frame(frame, source=source)
-                if result == "listening":
-                    wake_detected = True
-                    print("[LISTENING - SPEAK YOUR QUESTION!]", flush=True)
+            print("\n[LISTENING - say 'hey bmo' then your question...]", flush=True)
 
-            # Phase 2: Background thread handles VAD->STT->LLM->TTS
+            # Segment one utterance and transcribe it; only respond when it
+            # begins with the "hey bmo" wake phrase, keeping any command after it.
+            pcm = vad.collect_utterance(source, max_duration_s=20.0)
+            command = None
+            if pcm is not None:
+                stt_res = stt.transcribe(pcm)
+                if stt_res is not None and stt_res.text.strip():
+                    command = extract_wake_command(stt_res.text.strip())
+
+            if command is None:
+                source.close()
+                audio_sink.close()
+                continue
+
             print("[PROCESSING YOUR QUESTION...]", flush=True)
-            if turn_manager._active_thread:
-                turn_manager._active_thread.join(timeout=45.0)
+            if command:
+                turn_manager.run_text_turn(command)
+            else:
+                turn_manager.listen_and_respond(source)
 
             # Clean up
             audio_sink.close()

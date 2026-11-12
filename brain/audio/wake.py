@@ -1,12 +1,36 @@
 """Wake word detector with openWakeWord and cooldown management."""
 
 from collections.abc import Callable
+import re
 import time
 from typing import Any
 
 import numpy as np
 
 from brain.settings import AudioSettings
+
+
+# openWakeWord has no "hey bmo" model, so wake detection reuses the STT engine.
+# Whisper commonly renders "BMO" as bmo / beemo / bimo / "be mo" / "b m o".
+_WAKE_PREFIXES = r"(?:hey|hi|hay|hello|okay|ok|yo)"
+_BMO_VARIANTS = r"(?:b[\s.\-]*m[\s.\-]*o|beemo|bimo|be\s*mo|b\s*e\s*m\s*o)"
+_WAKE_RE = re.compile(
+    rf"\b{_WAKE_PREFIXES}\b[\s,.!?]*\b{_BMO_VARIANTS}\b",
+    re.IGNORECASE,
+)
+
+
+def extract_wake_command(text: str, wake_word: str = "hey bmo") -> str | None:
+    """Return the command following "hey bmo" in ``text``.
+
+    Returns ``None`` when the utterance is not addressed to BMO, an empty
+    string when only the wake phrase was spoken, or the trailing command text.
+    """
+    del wake_word  # currently specialised for "hey bmo"
+    match = _WAKE_RE.search(text)
+    if match is None:
+        return None
+    return text[match.end() :].strip(" ,.!?-")
 
 
 class WakeWordDetector:

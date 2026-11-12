@@ -160,7 +160,7 @@ def run_brain_voice(scene_cache) -> None:
     logger.info("Starting Brain voice assistant...")
     try:
         from brain.audio.io import AudioSettings, SoundDeviceSource, SoundDeviceSink
-        from brain.audio.wake import WakeWordDetector
+        from brain.audio.wake import WakeWordDetector, extract_wake_command
         from brain.audio.vad import VoiceActivityDetector
         from brain.audio.stt import SpeechToText
         from brain.audio.tts import TextToSpeech
@@ -204,7 +204,10 @@ def run_brain_voice(scene_cache) -> None:
             return
 
         state_machine = BrainStateMachine(lambda t, p, q, r: None)
-        wake = WakeWordDetector(audio_settings, model_name="hey_jarvis")
+        # The wake gate is handled by Whisper transcription below ("hey bmo"),
+        # since openWakeWord has no BMO model. This detector is only passed to
+        # TurnManager for interface compatibility and stays unused.
+        wake = WakeWordDetector(audio_settings)
         vad = VoiceActivityDetector(audio_settings)
         stt = SpeechToText(audio_settings)
         tts = TextToSpeech(audio_settings, model_path=PIPER_VOICE_PATH)
@@ -249,7 +252,7 @@ def run_brain_voice(scene_cache) -> None:
 
         # Minimal ready message
         print("cv is ready, brain is ready", flush=True)
-        print("type or speak to bmo", flush=True)
+        print('say "hey bmo" then your question, or type below', flush=True)
 
         # Start text input thread (typed messages share the same LLM->TTS pipeline)
         global _text_thread
@@ -258,18 +261,37 @@ def run_brain_voice(scene_cache) -> None:
         )
         _text_thread.start()
 
+        # Continuous listen loop: segment one utterance with VAD, transcribe it,
+        # and only respond when it starts with the "hey bmo" wake phrase.
+        # This also keeps the command that follows the wake word.
         while not _shutdown.is_set():
-            wake_detected = False
-            while not wake_detected and not _shutdown.is_set():
-                frame = source.read_frame()
-                if frame is None:
-                    continue
-                result = turn_manager.process_audio_frame(frame, source=source)
-                if result == "listening":
-                    wake_detected = True
+            try:
+                pcm = vad.collect_utterance(source, max_duration_s=10.0)
+            except Exception as exc:
+                logger.warning("VAD collect_utterance failed: %s", exc)
+                continue
+            if pcm is None or _shutdown.is_set():
+                continue
 
-            if turn_manager._active_thread:
-                turn_manager._active_thread.join(timeout=60.0)
+            stt_res = stt.transcribe(pcm)
+            if stt_res is None or not stt_res.text.strip():
+                continue
+
+            heard = stt_res.text.strip()
+            command = extract_wake_command(heard)
+            if command is None:
+                logger.debug("Ignoring speech (no wake word): %r", heard[:80])
+                continue
+
+            logger.info("Wake word detected: %r", heard[:80])
+            print(f"\n>>> You said: {heard}", flush=True)
+            try:
+                if command:
+                    turn_manager.run_text_turn(command)
+                else:
+                    turn_manager.listen_and_respond(source)
+            except Exception as exc:
+                logger.error("Turn failed: %s", exc, exc_info=True)
 
         if turn_manager._active_thread and turn_manager._active_thread.is_alive():
             turn_manager._active_thread.join(timeout=30.0)
@@ -301,8 +323,8 @@ def run_text_input(turn_manager) -> None:
     import os
     stdout = sys.__stdout__  # Use unbuffered original stdout (thread-safe)
     
-    # Check if TTS should be used for text input
-    use_tts = os.environ.get("BMO_TEXT_TTS", "0") == "1"
+    # Speak typed LLM replies by default; set BMO_TEXT_TTS=0 to disable.
+    use_tts = os.environ.get("BMO_TEXT_TTS", "1") == "1"
     tts = turn_manager._tts
     sink = turn_manager._sink
     
