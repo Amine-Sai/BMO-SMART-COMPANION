@@ -25,7 +25,7 @@ class LLMSettings(BaseModel):
     # llamacpp optimization settings
     n_gpu_layers: int = -1  # -1 = all layers on GPU (if available), 0 = CPU only
     n_threads: int = 8
-    use_flash_attn: bool = True
+    use_flash_attn: bool = False  # disabled on Turing (sm_75); CUDA graph capture unsupported
     use_mmap: bool = True
     use_mlock: bool = False
 

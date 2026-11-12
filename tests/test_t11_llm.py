@@ -34,12 +34,16 @@ def make_test_settings() -> LLMSettings:
 def test_load_settings_loads_llm_yaml() -> None:
     settings = load_settings("config/settings.d")
     assert isinstance(settings, Settings)
-    assert settings.llm.model == "qwen2.5:3b"
-    assert settings.llm.host == "http://127.0.0.1:11434"
-    assert settings.llm.num_ctx == 4096
+    assert settings.llm.backend == "llamacpp"
+    assert settings.llm.model == "Qwen3.5-4B-Q4_K_M.gguf"
+    assert settings.llm.host == "models/Qwen3.5-4B-Q4_K_M.gguf"
+    assert settings.llm.num_ctx == 2048
     assert settings.llm.keep_alive == "5m"
-    assert settings.llm.timeout_s == 10.0
-    assert settings.llm.temperature == 0.2
+    assert settings.llm.timeout_s == 30.0
+    assert settings.llm.temperature == 0.7
+    assert settings.llm.n_gpu_layers == -1
+    assert settings.llm.use_flash_attn is False
+    assert settings.llm.n_threads == 4
 
 
 def test_settings_is_frozen_and_rejects_mutation() -> None:

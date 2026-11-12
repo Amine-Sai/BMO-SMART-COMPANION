@@ -1,9 +1,19 @@
 llm:
-  model: "qwen2.5:3b"
-  host: "http://127.0.0.1:11434"
-  num_ctx: 4096
+  # Default backend: "ollama" or "llamacpp"
+  backend: "llamacpp"
+  # For ollama: model name; for llamacpp: model filename in models/
+  model: "Qwen3.5-4B-Q4_K_M.gguf"
+  # For ollama: base URL; for llamacpp: model path (relative to project root or absolute)
+  host: "models/Qwen3.5-4B-Q4_K_M.gguf"
+  num_ctx: 2048
   keep_alive: "5m"
-  timeout_s: 10.0
-  temperature: 0.2
+  timeout_s: 30.0
+  temperature: 0.7
   history_turns: 3
   history_max_tokens: 250
+  # llamacpp optimization settings
+  n_gpu_layers: -1  # -1 = all layers on GPU (if available), 0 = CPU only
+  n_threads: 4
+  use_flash_attn: false  # disabled on Turing (sm_75); CUDA graph capture unsupported
+  use_mmap: true
+  use_mlock: false

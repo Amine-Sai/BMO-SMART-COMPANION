@@ -164,32 +164,23 @@ def run_brain_voice(scene_cache) -> None:
         from brain.audio.vad import VoiceActivityDetector
         from brain.audio.stt import SpeechToText
         from brain.audio.tts import TextToSpeech
-        from brain.llm import LLMSettings, LLMClient
+        from brain.llm import LLMClient
         from brain.scene import SceneCache
         from brain.state import BrainStateMachine
         from brain.prompt import PromptBuilder
         from brain.tools.registry import ToolRegistry
         from brain.tools.scene_tools import register_scene_tools
         from brain.turn import TurnManager
+        from brain.settings import load_settings
         from pathlib import Path
 
         MODEL_PATH = Path("models/Qwen3.5-4B-Q4_K_M.gguf")
         PIPER_VOICE_PATH = Path(__file__).parent / "models/piper/en_US-lessac-medium.onnx"
 
-        AUDIO_SETTINGS = AudioSettings(
-            sample_rate=16000,
-            frame_ms=20,
-            wake_threshold=0.03,
-            vad_threshold=0.5,
-            vad_min_silence_ms=1000,
-            stt_model="base.en",
-            stt_device="cpu",
-            stt_compute_type="int8",
-            tts_voice="en_US-lessac-medium",
-            vad_chunk_samples=512,
-            vad_preroll_ms=250,
-            tts_max_clause_chars=80,
-        )
+        # Load settings from config (llm.yaml)
+        settings = load_settings()
+        llm_settings = settings.llm
+        audio_settings = settings.audio or AudioSettings()
 
         # Monkey-patch VAD for longer timeout
         original_collect = VoiceActivityDetector.collect_utterance
@@ -197,64 +188,20 @@ def run_brain_voice(scene_cache) -> None:
             return original_collect(self, source, max_duration_s=max_duration_s)
         VoiceActivityDetector.collect_utterance = extended_collect
 
-        class LoggingLLMClient:
-            def __init__(self, inner):
-                self._inner = inner
-                self._buffer = []
-
-            def chat(self, messages, **kwargs):
-                self._buffer = []
-                print("\n>>> BMO thinking...", flush=True)
-                for chunk in self._inner.chat(messages, **kwargs):
-                    if chunk.text:
-                        self._buffer.append(chunk.text)
-                        print(chunk.text, end="", flush=True)
-                    yield chunk
-                if self._buffer:
-                    full = "".join(self._buffer).strip()
-                    print(f"\n>>> BMO response: {full}\n", flush=True)
-
-            def unload(self):
-                self._inner.unload()
-
-            def prewarm(self):
-                self._inner.prewarm()
-
-        print("=" * 60)
-        print("  BMO VOICE ASSISTANT - Connected to CV via MQTT")
-        print("=" * 60)
-        print("Wake words: hey jarvis | alexa | hey mycroft | hey rhasspy")
-        print("CV events will appear in scene context automatically")
-        print("=" * 60)
-
         if not PIPER_VOICE_PATH.exists():
             logger.error("Piper voice not found at %s", PIPER_VOICE_PATH)
             return
 
         state_machine = BrainStateMachine(lambda t, p, q, r: None)
-        wake = WakeWordDetector(AUDIO_SETTINGS, model_name="hey_jarvis")
-        vad = VoiceActivityDetector(AUDIO_SETTINGS)
-        stt = SpeechToText(AUDIO_SETTINGS)
-        tts = TextToSpeech(AUDIO_SETTINGS, model_path=PIPER_VOICE_PATH)
+        wake = WakeWordDetector(audio_settings, model_name="hey_jarvis")
+        vad = VoiceActivityDetector(audio_settings)
+        stt = SpeechToText(audio_settings)
+        tts = TextToSpeech(audio_settings, model_path=PIPER_VOICE_PATH)
 
-        # llama-cpp tuned for GPU (offload all layers, enable flash attention)
-        llm_settings = LLMSettings(
-            backend="llamacpp",
-            host=str(MODEL_PATH.absolute()),
-            model="Qwen3.5-4B-Q4_K_M",
-            num_ctx=2048,
-            temperature=0.7,
-            n_gpu_layers=-1,
-            n_threads=4,
-            use_flash_attn=True,
-            use_mmap=True,
-            use_mlock=False,
-        )
-        llm = LoggingLLMClient(LLMClient(llm_settings))
+        llm = LLMClient(llm_settings)
         # Model loads lazily on first chat() call (in the worker thread),
         # avoiding CUDA context thread-affinity issues from pre-warming on
         # the main thread.
-        print(">>> Qwen model will load on first request (GPU, ~10-20s first turn)...", flush=True)
 
         prompt_builder = PromptBuilder(
             scene_cache,
@@ -264,7 +211,7 @@ def run_brain_voice(scene_cache) -> None:
         tools = ToolRegistry()
         register_scene_tools(tools, scene_cache)
 
-        audio_sink = SoundDeviceSink(AUDIO_SETTINGS.sample_rate)
+        audio_sink = SoundDeviceSink(audio_settings.sample_rate)
 
         turn_manager = TurnManager(
             state_machine=state_machine,
@@ -279,11 +226,11 @@ def run_brain_voice(scene_cache) -> None:
             publish_fn=lambda t, p, q, r: None,
         )
 
-        source = SoundDeviceSource(AUDIO_SETTINGS.sample_rate)
+        source = SoundDeviceSource(audio_settings.sample_rate)
 
-        print("\n" + "=" * 60, flush=True)
-        print("  BMO IS READY — type a message at the > prompt, or say 'hey jarvis'", flush=True)
-        print("=" * 60 + "\n", flush=True)
+        # Minimal ready message
+        print("cv is ready, brain is ready", flush=True)
+        print("type or speak to bmo", flush=True)
 
         # Start text input thread (typed messages share the same LLM->TTS pipeline)
         global _text_thread
@@ -293,8 +240,6 @@ def run_brain_voice(scene_cache) -> None:
         _text_thread.start()
 
         while not _shutdown.is_set():
-            print("\n[WAITING FOR WAKE WORD...]", flush=True)
-
             wake_detected = False
             while not wake_detected and not _shutdown.is_set():
                 frame = source.read_frame()
@@ -303,16 +248,11 @@ def run_brain_voice(scene_cache) -> None:
                 result = turn_manager.process_audio_frame(frame, source=source)
                 if result == "listening":
                     wake_detected = True
-                    print("[LISTENING - SPEAK YOUR QUESTION!]", flush=True)
 
-            print("[PROCESSING YOUR QUESTION...]", flush=True)
             if turn_manager._active_thread:
                 turn_manager._active_thread.join(timeout=60.0)
 
-            print("[READY FOR NEXT]", flush=True)
-
         if turn_manager._active_thread and turn_manager._active_thread.is_alive():
-            print("[WAITING FOR TURN TO COMPLETE...]", flush=True)
             turn_manager._active_thread.join(timeout=30.0)
 
         audio_sink.close()
@@ -333,10 +273,6 @@ def run_text_input(turn_manager) -> None:
     through LLM -> TTS -> speaker exactly like voice input. Runs until
     _shutdown is set or the user types 'quit'/'exit'.
     """
-    logger.info("Text input thread started. Type messages and press Enter.")
-    print("\n[TYPING MODE] Type a message and press Enter to talk to BMO. "
-          "Type 'quit' or 'exit' to stop. Wake-word voice input still works.\n", flush=True)
-
     while not _shutdown.is_set():
         try:
             line = input("> ")
@@ -351,13 +287,10 @@ def run_text_input(turn_manager) -> None:
             _shutdown.set()
             break
 
-        print(f">>> Sending to BMO: {text}", flush=True)
         try:
             turn_manager.start_text_turn(text)
         except Exception as exc:
             logger.error("Text input turn failed: %s", exc)
-
-    logger.info("Text input thread stopped")
 
 
 def signal_handler(signum, frame):
@@ -370,10 +303,6 @@ def main():
     """Main entry point - starts all components in coordination."""
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-
-    logger.info("=" * 60)
-    logger.info("  BMO FULL SYSTEM STARTUP")
-    logger.info("=" * 60)
 
     # 1. Verify MQTT broker (mosquitto) is reachable
     start_mqtt_broker()
@@ -390,7 +319,6 @@ def main():
     global _cv_thread
     _cv_thread = threading.Thread(target=run_cv_pipeline, daemon=True, name="CV-Pipeline")
     _cv_thread.start()
-    logger.info("CV pipeline thread started")
 
     # Give CV time to connect to broker
     time.sleep(3)
@@ -408,11 +336,9 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        logger.info("Shutting down...")
         _shutdown.set()
         stop_scene_subscriber()
         stop_mqtt_broker()
-        logger.info("Shutdown complete")
 
 
 if __name__ == "__main__":
