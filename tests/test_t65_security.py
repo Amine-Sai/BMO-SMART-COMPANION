@@ -194,11 +194,8 @@ class TestSecurityAndFailureInjection(unittest.TestCase):
             publish_fn=self.publish_fn,
         )
 
-        with self.assertRaises(TimeoutError):
-            turn.run_text_turn("Test prompt with timeout")
-
-        # Recover to idle on exception
-        self.state_machine.transition(BrainState.IDLE)
+        reply = turn.run_text_turn("Test prompt with timeout")
+        self.assertIn("error", reply.lower())
         self.assertEqual(self.state_machine.state, BrainState.IDLE)
 
     def test_failure_injection_cv_offline_and_stale(self) -> None:

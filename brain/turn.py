@@ -114,7 +114,7 @@ class TurnManager:
         self._play_threads: list[threading.Thread] = []
 
     def process_audio_frame(self, frame: np.ndarray, source: AudioSource | None = None) -> str | None:
-        if self._state_machine.state == BrainState.SPEAKING:
+        if self._state_machine.state in (BrainState.SPEAKING, BrainState.THINKING):
             if self._wake.process_frame(frame):
                 self.barge_in()
                 return "barge_in"
@@ -130,7 +130,7 @@ class TurnManager:
                         and self._active_thread is not threading.current_thread()
                     ):
                         self._active_thread.join(timeout=0.25)
-                    self.cancel_event.clear()
+                    self.cancel_event = threading.Event()
                     self._active_thread = threading.Thread(
                         target=self.listen_and_respond,
                         args=(source,),
@@ -144,8 +144,10 @@ class TurnManager:
     def barge_in(self) -> float:
         t0 = self._clock()
         self.cancel_event.set()
-        self._tts.cancel()
-        self._sink.stop()
+        if hasattr(self._tts, "cancel"):
+            self._tts.cancel()
+        if hasattr(self._sink, "stop"):
+            self._sink.stop()
         if (
             self._active_thread is not None
             and self._active_thread.is_alive()
@@ -153,11 +155,11 @@ class TurnManager:
         ):
             self._active_thread.join(timeout=0.25)
         self._active_thread = None
-        if self._state_machine.state in (
-            BrainState.SPEAKING,
-            BrainState.THINKING,
-            BrainState.IDLE,
-        ):
+        current_state = self._state_machine.state
+        if current_state == BrainState.THINKING:
+            self._state_machine.transition(BrainState.IDLE)
+            self._state_machine.transition(BrainState.LISTENING)
+        elif current_state in (BrainState.SPEAKING, BrainState.IDLE):
             self._state_machine.transition(BrainState.LISTENING)
         return (self._clock() - t0) * 1000.0
 
@@ -169,19 +171,19 @@ class TurnManager:
             pcm = self._vad.collect_utterance(source)
         except Exception as exc:
             logger.warning("VAD collect_utterance failed: %s", exc)
-            if self._state_machine.state != BrainState.IDLE:
+            if self._state_machine.state == BrainState.LISTENING:
                 self._state_machine.transition(BrainState.IDLE)
             return None
 
         t_vad_end = self._clock()
         if pcm is None:
-            if self._state_machine.state != BrainState.IDLE:
+            if self._state_machine.state == BrainState.LISTENING:
                 self._state_machine.transition(BrainState.IDLE)
             return None
 
         stt_res = self._stt.transcribe(pcm)
         if stt_res is None or not stt_res.text.strip():
-            if self._state_machine.state != BrainState.IDLE:
+            if self._state_machine.state == BrainState.LISTENING:
                 self._state_machine.transition(BrainState.IDLE)
             return None
 
@@ -202,7 +204,7 @@ class TurnManager:
             logger.info("turn busy, dropping")
             return False
         try:
-            self.cancel_event.clear()
+            self.cancel_event = threading.Event()
             self._state_machine.transition(BrainState.THINKING)
         except BaseException:
             self._turn_gate.release()
@@ -228,14 +230,21 @@ class TurnManager:
         self._play_threads.append(thread)
         thread.start()
 
-    def _wait_playback(self) -> None:
+    def _wait_playback(self, cancel_event: threading.Event | None = None) -> None:
+        cancel = cancel_event if cancel_event is not None else self.cancel_event
+        deadline = self._clock() + 30.0
         for thread in list(self._play_threads):
-            thread.join(timeout=30.0)
+            if cancel.is_set():
+                break
+            while thread.is_alive() and self._clock() < deadline:
+                if cancel.is_set():
+                    break
+                thread.join(timeout=0.05)
         self._play_threads.clear()
 
-    def _text_turn_worker(self, text: str) -> None:
+    def _text_turn_worker(self, text: str, turn_cancel: threading.Event) -> None:
         try:
-            self._run_turn(text)
+            self._run_turn(text, turn_cancel=turn_cancel)
         finally:
             self._end_turn()
 
@@ -246,10 +255,13 @@ class TurnManager:
         dropped rather than blocking the caller.
         """
         if not self._begin_turn():
+            if self._state_machine.state == BrainState.LISTENING:
+                self._state_machine.transition(BrainState.IDLE)
             return None
+        turn_cancel = self.cancel_event
         thread = threading.Thread(
             target=self._text_turn_worker,
-            args=(text,),
+            args=(text, turn_cancel),
             daemon=True,
         )
         self._active_thread = thread
@@ -271,10 +283,14 @@ class TurnManager:
         followup: bool = False,
     ) -> str:
         if not self._begin_turn():
+            if self._state_machine.state == BrainState.LISTENING:
+                self._state_machine.transition(BrainState.IDLE)
             return ""
+        turn_cancel = self.cancel_event
         try:
             return self._run_turn(
                 user_text,
+                turn_cancel=turn_cancel,
                 confirmed=confirmed,
                 vad_end_ts=vad_end_ts,
                 stt_ms=stt_ms,
@@ -287,180 +303,185 @@ class TurnManager:
         self,
         user_text: str,
         *,
+        turn_cancel: threading.Event | None = None,
         confirmed: bool = False,
         vad_end_ts: float | None = None,
         stt_ms: float = 0.0,
         followup: bool = False,
     ) -> str:
-        memory = getattr(self._prompt_builder, "memory", None)
-        if memory is not None:
-            try:
-                for note in apply_memory_effects(user_text, memory):
-                    logger.info("memory: %s", note)
-            except Exception as exc:
-                logger.warning("memory update failed: %s", exc)
+        if turn_cancel is None:
+            turn_cancel = self.cancel_event
 
-        vision_target_kind = resolve_vision_target(
-            user_text,
-            followup=followup,
-            last_target=self._last_vision_target,
-            last_at=self._last_vision_at,
-            now=self._clock(),
-        )
-        if followup and vision_target_kind and vision_target(user_text) is None:
-            logger.info(
-                "Follow-up references the last scene; looking again (%s)",
-                vision_target_kind,
-            )
-        if vision_target_kind:
-            self._last_vision_target = vision_target_kind
-            self._last_vision_at = self._clock()
-        if self._vision_request_fn is not None and vision_target_kind:
-            try:
-                logger.info("Vision intent (%s); requesting fresh camera look", vision_target_kind)
-                self._vision_request_fn(vision_target_kind)
-            except Exception as exc:
-                logger.warning("Vision request failed: %s", exc)
-
-        messages = self._prompt_builder.build_messages(user_text, scene_target=vision_target_kind)
-
-        t_turn_start = self._clock()
-        t_llm_start = self._clock()
-        llm_ttft_ms = 0.0
-        tts_first_chunk_ms = 0.0
-        first_chunk_seen = False
-        first_sentence_emitted = False
-        utt_id = uuid.uuid4().hex[:8]
-        splitter = SentenceSplitter()
-        reply_chunks: list[str] = []
-
-        logger.info("LLM chat starting for user text: %r", user_text[:80])
-
-        turn_emotion = Emotion.NEUTRAL
-
-        def _speak_sentence(sentence: str) -> None:
-            nonlocal first_sentence_emitted, tts_first_chunk_ms, turn_emotion
-            clean = sentence.strip()
-            if not clean or self.cancel_event.is_set():
-                return
-            parsed_emotion, clean = split_emotion_tag(clean)
-            if parsed_emotion is not None:
-                turn_emotion = parsed_emotion
-            if not clean:
-                return
-
-            if not first_sentence_emitted:
-                first_sentence_emitted = True
-                print(f"bmo: {clean}", flush=True, file=sys.__stdout__)
-                self._state_machine.transition(BrainState.SPEAKING)
-                if self._publish_fn is not None:
-                    say = BrainSay(
-                        utt_id=utt_id,
-                        text=clean,
-                        emotion=turn_emotion,
-                    )
-                    self._publish_fn(
-                        BRAIN_SAY,
-                        say.model_dump_json().encode("utf-8"),
-                        1,
-                        False,
-                    )
-                t_tts0 = self._clock()
-                try:
-                    self._tts.speak_sentence(clean, self._sink, cancel_event=self.cancel_event)
-                except Exception as exc:
-                    logger.error("TTS speak_sentence failed: %s", exc)
-                    return
-                tts_first_chunk_ms = (self._clock() - t_tts0) * 1000.0
-            else:
-                print(f"     {clean}", flush=True, file=sys.__stdout__)
-                if self._publish_fn is not None:
-                    say = BrainSay(
-                        utt_id=utt_id,
-                        text=clean,
-                        emotion=turn_emotion,
-                    )
-                    self._publish_fn(
-                        BRAIN_SAY,
-                        say.model_dump_json().encode("utf-8"),
-                        1,
-                        False,
-                    )
-                try:
-                    self._tts.speak_sentence(clean, self._sink, cancel_event=self.cancel_event)
-                except Exception as exc:
-                    logger.error("TTS speak_sentence failed: %s", exc)
-                    return
-
-            # Play asynchronously so the next sentence can be produced while
-            # this one is still audible.
-            self._queue_playback()
-
-        # The single-flight gate guarantees only one llama-cpp decode at a time.
-        t_chat0 = self._clock()
         try:
-            tool_specs = self._tools.ollama_tools() if needs_tools(user_text) else None
-            for chunk in self._llm.chat(
-                messages,
-                tools=tool_specs,
-                stream=True,
-                cancel_event=self.cancel_event,
-            ):
-                if self.cancel_event.is_set():
-                    break
-                if not first_chunk_seen:
-                    first_chunk_seen = True
-                    llm_ttft_ms = (self._clock() - t_llm_start) * 1000.0
-                    logger.info("First LLM token after %.1fms", llm_ttft_ms)
+            memory = getattr(self._prompt_builder, "memory", None)
+            if memory is not None:
+                try:
+                    for note in apply_memory_effects(user_text, memory):
+                        logger.info("memory: %s", note)
+                except Exception as exc:
+                    logger.warning("memory update failed: %s", exc)
 
-                if chunk.tool_call is not None:
-                    self._tools.dispatch(chunk.tool_call, confirmed=confirmed)
+            vision_target_kind = resolve_vision_target(
+                user_text,
+                followup=followup,
+                last_target=self._last_vision_target,
+                last_at=self._last_vision_at,
+                now=self._clock(),
+            )
+            if followup and vision_target_kind and vision_target(user_text) is None:
+                logger.info(
+                    "Follow-up references the last scene; looking again (%s)",
+                    vision_target_kind,
+                )
+            if vision_target_kind:
+                self._last_vision_target = vision_target_kind
+                self._last_vision_at = self._clock()
+            if self._vision_request_fn is not None and vision_target_kind:
+                try:
+                    logger.info("Vision intent (%s); requesting fresh camera look", vision_target_kind)
+                    self._vision_request_fn(vision_target_kind)
+                except Exception as exc:
+                    logger.warning("Vision request failed: %s", exc)
 
-                if chunk.text:
-                    reply_chunks.append(chunk.text)
-                    fed = splitter.feed(chunk.text)
-                    if fed is not None:
-                        sentences = [fed] if isinstance(fed, str) else list(fed)
-                        for s in sentences:
-                            _speak_sentence(s)
-                            if self.cancel_event.is_set():
-                                break
-            t_chat1 = self._clock()
-            logger.info("LLM chat completed in %.1fs, %d chunks", t_chat1 - t_chat0, len(reply_chunks))
-        except Exception as exc:
-            logger.error("LLM chat failed: %s", exc, exc_info=True)
-            reply_chunks.append(f"[LLM error: {exc}]")
+            messages = self._prompt_builder.build_messages(user_text, scene_target=vision_target_kind)
 
-        if not self.cancel_event.is_set():
-            flushed = splitter.flush()
-            if flushed is not None:
-                flushed_sentences = [flushed] if isinstance(flushed, str) else list(flushed)
-                for s in flushed_sentences:
-                    _speak_sentence(s)
-                    if self.cancel_event.is_set():
+            t_turn_start = self._clock()
+            t_llm_start = self._clock()
+            llm_ttft_ms = 0.0
+            tts_first_chunk_ms = 0.0
+            first_chunk_seen = False
+            first_sentence_emitted = False
+            utt_id = uuid.uuid4().hex[:8]
+            splitter = SentenceSplitter()
+            reply_chunks: list[str] = []
+
+            logger.info("LLM chat starting for user text: %r", user_text[:80])
+
+            turn_emotion = Emotion.NEUTRAL
+
+            def _speak_sentence(sentence: str) -> None:
+                nonlocal first_sentence_emitted, tts_first_chunk_ms, turn_emotion
+                clean = sentence.strip()
+                if not clean or turn_cancel.is_set():
+                    return
+                parsed_emotion, clean = split_emotion_tag(clean)
+                if parsed_emotion is not None:
+                    turn_emotion = parsed_emotion
+                if not clean:
+                    return
+
+                if not first_sentence_emitted:
+                    first_sentence_emitted = True
+                    print(f"bmo: {clean}", flush=True, file=sys.__stdout__)
+                    self._state_machine.transition(BrainState.SPEAKING)
+                    if self._publish_fn is not None:
+                        say = BrainSay(
+                            utt_id=utt_id,
+                            text=clean,
+                            emotion=turn_emotion,
+                        )
+                        self._publish_fn(
+                            BRAIN_SAY,
+                            say.model_dump_json().encode("utf-8"),
+                            1,
+                            False,
+                        )
+                    t_tts0 = self._clock()
+                    try:
+                        self._tts.speak_sentence(clean, self._sink, cancel_event=turn_cancel)
+                    except Exception as exc:
+                        logger.error("TTS speak_sentence failed: %s", exc)
+                        return
+                    tts_first_chunk_ms = (self._clock() - t_tts0) * 1000.0
+                else:
+                    print(f"     {clean}", flush=True, file=sys.__stdout__)
+                    if self._publish_fn is not None:
+                        say = BrainSay(
+                            utt_id=utt_id,
+                            text=clean,
+                            emotion=turn_emotion,
+                        )
+                        self._publish_fn(
+                            BRAIN_SAY,
+                            say.model_dump_json().encode("utf-8"),
+                            1,
+                            False,
+                        )
+                    try:
+                        self._tts.speak_sentence(clean, self._sink, cancel_event=turn_cancel)
+                    except Exception as exc:
+                        logger.error("TTS speak_sentence failed: %s", exc)
+                        return
+
+                # Play asynchronously so the next sentence can be produced while
+                # this one is still audible.
+                self._queue_playback()
+
+            # The single-flight gate guarantees only one llama-cpp decode at a time.
+            t_chat0 = self._clock()
+            try:
+                tool_specs = self._tools.ollama_tools() if needs_tools(user_text) else None
+                for chunk in self._llm.chat(
+                    messages,
+                    tools=tool_specs,
+                    stream=True,
+                    cancel_event=turn_cancel,
+                ):
+                    if turn_cancel.is_set():
                         break
+                    if not first_chunk_seen:
+                        first_chunk_seen = True
+                        llm_ttft_ms = (self._clock() - t_llm_start) * 1000.0
+                        logger.info("First LLM token after %.1fms", llm_ttft_ms)
 
-        full_reply = strip_emotion_tags("".join(reply_chunks))
-        self._prompt_builder.record_turn(user_text, full_reply)
+                    if chunk.tool_call is not None:
+                        self._tools.dispatch(chunk.tool_call, confirmed=confirmed)
 
-        # Keep the face in SPEAKING until the queued audio has actually played.
-        self._wait_playback()
+                    if chunk.text:
+                        reply_chunks.append(chunk.text)
+                        fed = splitter.feed(chunk.text)
+                        if fed is not None:
+                            sentences = [fed] if isinstance(fed, str) else list(fed)
+                            for s in sentences:
+                                _speak_sentence(s)
+                                if turn_cancel.is_set():
+                                    break
+                t_chat1 = self._clock()
+                logger.info("LLM chat completed in %.1fs, %d chunks", t_chat1 - t_chat0, len(reply_chunks))
+            except Exception as exc:
+                logger.error("LLM chat failed: %s", exc, exc_info=True)
+                reply_chunks.append(f"[LLM error: {exc}]")
 
-        if not self.cancel_event.is_set() and self._state_machine.state in (
-            BrainState.SPEAKING,
-            BrainState.THINKING,
-        ):
-            self._state_machine.transition(BrainState.IDLE)
+            if not turn_cancel.is_set():
+                flushed = splitter.flush()
+                if flushed is not None:
+                    flushed_sentences = [flushed] if isinstance(flushed, str) else list(flushed)
+                    for s in flushed_sentences:
+                        _speak_sentence(s)
+                        if turn_cancel.is_set():
+                            break
 
-        if self._on_turn_metrics is not None:
-            metrics: dict[str, float] = {
-                "llm_ttft_ms": llm_ttft_ms,
-                "tts_first_chunk_ms": tts_first_chunk_ms,
-                "stt_ms": stt_ms,
-                "turn_ms": (self._clock() - t_turn_start) * 1000.0,
-            }
-            if vad_end_ts is not None:
-                metrics["e2e_voice_ms"] = (self._clock() - vad_end_ts) * 1000.0
-            self._on_turn_metrics(metrics)
+            full_reply = strip_emotion_tags("".join(reply_chunks))
+            self._prompt_builder.record_turn(user_text, full_reply)
 
-        return full_reply
+            # Keep the face in SPEAKING until the queued audio has actually played.
+            self._wait_playback(turn_cancel)
+
+            if self._on_turn_metrics is not None:
+                metrics: dict[str, float] = {
+                    "llm_ttft_ms": llm_ttft_ms,
+                    "tts_first_chunk_ms": tts_first_chunk_ms,
+                    "stt_ms": stt_ms,
+                    "turn_ms": (self._clock() - t_turn_start) * 1000.0,
+                }
+                if vad_end_ts is not None:
+                    metrics["e2e_voice_ms"] = (self._clock() - vad_end_ts) * 1000.0
+                self._on_turn_metrics(metrics)
+
+            return full_reply
+        finally:
+            if self._state_machine.state in (
+                BrainState.THINKING,
+                BrainState.SPEAKING,
+            ):
+                self._state_machine.transition(BrainState.IDLE)

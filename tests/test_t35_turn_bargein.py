@@ -134,6 +134,7 @@ class DummyPromptBuilder(PromptBuilder):
         pass
 
     def build_messages(self, user_text: str, scene_target=None) -> list[dict[str, Any]]:
+        _ = scene_target
         return [{"role": "user", "content": user_text}]
 
     def record_turn(self, user_text: str, assistant_text: str) -> None:
@@ -401,3 +402,186 @@ def test_barge_in_during_proactive_turn() -> None:
     assert "llm_ttft_ms" in metrics_captured[0]
     assert "tts_first_chunk_ms" in metrics_captured[0]
     assert "e2e_voice_ms" in metrics_captured[0]
+
+
+def test_barge_in_during_thinking_succeeds_and_releases_gate() -> None:
+    sm = BrainStateMachine(publish_fn=_noop_publish)
+    wake = DummyWake(score=0.95)
+    vad = DummyVAD()
+    stt = DummySTT()
+
+    chat_started = threading.Event()
+
+    class BlockingLLMClient(LLMClient):
+        def __init__(self) -> None:
+            pass
+
+        def chat(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]] | None = None,
+            stream: bool = False,
+            cancel_event: threading.Event | None = None,
+        ):
+            _ = (messages, tools, stream)
+            chat_started.set()
+            if cancel_event is not None:
+                cancel_event.wait(timeout=2.0)
+            yield ChatChunk(text="Finished")
+
+    llm = BlockingLLMClient()
+    builder = DummyPromptBuilder()
+    tools = ToolRegistry()
+    tts = DummyTTS()
+    sink = MemorySink()
+
+    turn = TurnManager(
+        state_machine=sm,
+        wake=wake,
+        vad=vad,
+        stt=stt,
+        llm=llm,
+        prompt_builder=builder,
+        tools=tools,
+        tts=tts,
+        sink=sink,
+    )
+
+    turn.start_text_turn("Slow prompt")
+    assert chat_started.wait(timeout=1.0)
+    assert sm.state == BrainState.THINKING
+    assert turn._turn_gate.locked()
+
+    # Barge-in during THINKING
+    frame = np.zeros(160, dtype=np.int16)
+    res = turn.process_audio_frame(frame)
+    assert res == "barge_in"
+    assert sm.state == BrainState.LISTENING
+    assert not turn._turn_gate.locked()
+
+    # Verify a subsequent turn can immediately acquire gate
+    next_llm = DummyLLM(text="Second turn")
+    turn._llm = next_llm
+    reply = turn.run_text_turn("New turn after barge-in")
+    assert reply == "Second turn"
+
+
+def test_cancelled_turn_recovers_to_idle_when_not_barged() -> None:
+    sm = BrainStateMachine(publish_fn=_noop_publish)
+    wake = DummyWake()
+    vad = DummyVAD()
+    stt = DummySTT()
+
+    chat_started = threading.Event()
+
+    class BlockingLLMClient(LLMClient):
+        def __init__(self) -> None:
+            pass
+
+        def chat(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]] | None = None,
+            stream: bool = False,
+            cancel_event: threading.Event | None = None,
+        ):
+            _ = (messages, tools, stream)
+            chat_started.set()
+            if cancel_event is not None:
+                cancel_event.wait(timeout=2.0)
+            yield ChatChunk(text="Finished")
+
+    turn = TurnManager(
+        state_machine=sm,
+        wake=wake,
+        vad=vad,
+        stt=stt,
+        llm=BlockingLLMClient(),
+        prompt_builder=DummyPromptBuilder(),
+        tools=ToolRegistry(),
+        tts=DummyTTS(),
+        sink=MemorySink(),
+    )
+
+    turn.start_text_turn("Cancel test")
+    assert chat_started.wait(timeout=1.0)
+    assert sm.state == BrainState.THINKING
+    assert turn._turn_gate.locked()
+
+    # Cancel directly without barge_in()
+    turn.cancel_event.set()
+    assert turn._active_thread is not None
+    turn._active_thread.join(timeout=1.0)
+
+    # State must recover to IDLE (not stuck in THINKING or set to LISTENING)
+    assert sm.state == BrainState.IDLE
+    assert not turn._turn_gate.locked()
+
+
+def test_old_slow_worker_stays_cancelled_when_new_turn_starts() -> None:
+    sm = BrainStateMachine(publish_fn=_noop_publish)
+    wake = DummyWake(score=0.95)
+    vad = DummyVAD()
+    stt = DummySTT()
+
+    first_started = threading.Event()
+    first_worker_cancel_token: threading.Event | None = None
+    first_worker_resumed_after_new_turn = False
+
+    class SlowFirstLLMClient(LLMClient):
+        def __init__(self) -> None:
+            pass
+
+        def chat(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]] | None = None,
+            stream: bool = False,
+            cancel_event: threading.Event | None = None,
+        ):
+            nonlocal first_worker_cancel_token, first_worker_resumed_after_new_turn
+            _ = (messages, tools, stream)
+            first_worker_cancel_token = cancel_event
+            first_started.set()
+            if cancel_event is not None:
+                cancel_event.wait(timeout=2.0)
+            time.sleep(0.05)
+            if cancel_event is not None and not cancel_event.is_set():
+                first_worker_resumed_after_new_turn = True
+            yield ChatChunk(text="Lingering text")
+
+    turn = TurnManager(
+        state_machine=sm,
+        wake=wake,
+        vad=vad,
+        stt=stt,
+        llm=SlowFirstLLMClient(),
+        prompt_builder=DummyPromptBuilder(),
+        tools=ToolRegistry(),
+        tts=DummyTTS(),
+        sink=MemorySink(),
+    )
+
+    turn.start_text_turn("First turn")
+    assert first_started.wait(timeout=1.0)
+    first_thread = turn._active_thread
+    assert first_thread is not None
+
+    # Cancel worker 1 via barge_in
+    turn.barge_in()
+    assert first_worker_cancel_token is not None
+    assert first_worker_cancel_token.is_set()
+
+    # Now start Turn 2 with a fast LLM
+    turn._llm = DummyLLM(text="Second turn reply")
+    turn.start_text_turn("Second turn")
+
+    # Turn 2's cancel event must be a fresh event, distinct from worker 1's token
+    assert turn.cancel_event is not first_worker_cancel_token
+    assert not turn.cancel_event.is_set()
+
+    # Worker 1's token must stay set permanently
+    assert first_worker_cancel_token.is_set()
+
+    first_thread.join(timeout=1.0)
+    assert not first_worker_resumed_after_new_turn

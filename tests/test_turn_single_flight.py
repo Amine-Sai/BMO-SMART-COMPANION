@@ -21,6 +21,7 @@ class _Prompt(PromptBuilder):
         pass
 
     def build_messages(self, user_text: str, scene_target=None) -> list[dict[str, Any]]:
+        _ = scene_target
         return [{"role": "user", "content": user_text}]
 
     def record_turn(self, user_text: str, assistant_text: str) -> None:
@@ -83,3 +84,24 @@ def test_second_text_turn_is_dropped_not_queued(caplog: Any) -> None:
     # Gate is released afterwards, so the next turn runs normally.
     assert turn.run_text_turn("third") == "One. Two. Three. "
     assert len(backend.calls) == 2
+
+
+def test_barge_in_during_turn_releases_gate_so_next_turn_runs() -> None:
+    backend = FakeLLMBackend(chunks=["One. ", "Two. ", "Three. "], chunk_delay=0.1)
+    turn, sm, _tts = _manager(backend)
+
+    turn.start_text_turn("first")
+    first = turn._active_thread
+    assert first is not None and first.is_alive()
+
+    # Barge in while first turn is running
+    turn.barge_in()
+    assert sm.state == BrainState.LISTENING
+    assert not turn._turn_gate.locked()
+
+    # Next turn runs immediately
+    next_backend = FakeLLMBackend(chunks=["New. "])
+    turn._llm = LLMClient(settings=LLMSettings(), backend=next_backend)
+    reply = turn.run_text_turn("second")
+    assert reply == "New. "
+    assert sm.state == BrainState.IDLE
