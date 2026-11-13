@@ -156,7 +156,6 @@ def test_voice_activity_detector_rechunks_320_to_512() -> None:
 
     vad = VoiceActivityDetector(settings=settings, speech_prob_fn=capture_speech_prob_fn)
     speech_frame = np.full(FRAME_SAMPLES, 5000, dtype=np.int16)
-    silent_frame = np.zeros(FRAME_SAMPLES, dtype=np.int16)
 
     # Feed 5 speech frames (5 * 320 = 1600 samples)
     # Should produce 3 full 512-sample chunks + remainder

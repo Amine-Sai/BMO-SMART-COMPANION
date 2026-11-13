@@ -1,7 +1,6 @@
 """Tests for BMO Contract Models, Serialization, and CV Conformance."""
 
 import json
-import re
 import unittest
 from unittest.mock import MagicMock
 

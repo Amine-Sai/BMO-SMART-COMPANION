@@ -109,7 +109,7 @@ class MockPromptBuilder(PromptBuilder):
         pass
 
     def build_messages(self, user_text: str, scene_target=None) -> list[dict[str, Any]]:
-        _ = user_text
+        _ = (user_text, scene_target)
         return [{"role": "user", "content": user_text}]
 
     def record_turn(self, user_text: str, assistant_text: str) -> None:

@@ -61,7 +61,7 @@ def extract_memories(text: str) -> list[tuple[str, str, str]]:
         if value:
             found.append(("work", value, "fact"))
 
-    # People: "this is [name]" or "meet [name]" or "remember [name]"
+    # People: this is <name>, meet <name>, or remember <name>
     m = re.search(r"\b(?:this is|meet|remember)\s+([A-Z][a-z]+)(?:\s+.+?)(?:[.!?]|$)", t)
     if m:
         name = _clean(m.group(1))
@@ -71,7 +71,7 @@ def extract_memories(text: str) -> list[tuple[str, str, str]]:
             detail = _clean(rest) if rest else f"Met {name}"
             found.append((f"person {name}", detail, "person"))
 
-    # Objects: "this is a [object]" or "remember this [object]"
+    # Objects: this is a <object> or remember this <object>
     m = re.search(r"\b(?:this is (?:a|an)|remember (?:this|that))\s+([a-z]+)(?:\s+.+?)(?:[.!?]|$)", t, re.IGNORECASE)
     if m:
         obj = _clean(m.group(1))
