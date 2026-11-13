@@ -125,7 +125,7 @@ def main() -> None:
     p = argparse.ArgumentParser(description="VRAM baseline probe")
     p.add_argument(
         "--output",
-        default="docs/acceptance/T0.5/vram_baseline.csv",
+        default="logs/vram_baseline.csv",
         help="Output CSV path",
     )
     p.add_argument("--interval", type=float, default=1.0, help="Polling interval in seconds")

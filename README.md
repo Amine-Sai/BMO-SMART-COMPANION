@@ -209,8 +209,8 @@ Press the mute key or send `{"kind": "mute_switch", "value": true}` to BMO's inp
 # Fast test suite (no GPU, hardware, or broker needed)
 .venv/bin/python -m pytest -m "not gpu and not slow and not hw and not broker" -q
 
-# Acceptance gates
-.venv/bin/python tools/check_acceptance.py
+# Acceptance gates / full test suite
+.venv/bin/pytest
 
 # Linting and formatting
 .venv/bin/ruff check --select F,ARG,ERA,B bmo_contracts brain tools tests
