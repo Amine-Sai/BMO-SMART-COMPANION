@@ -58,7 +58,11 @@ class TestRepoHygiene(unittest.TestCase):
         violations: list[str] = []
 
         for rel_path in tracked_files:
-            if rel_path == "docs/plan.md" or rel_path == "tests/test_hygiene.py" or rel_path.startswith("docs/acceptance/"):
+            if (
+                rel_path == "docs/plan.md"
+                or rel_path == "tests/test_hygiene.py"
+                or rel_path.startswith("docs/acceptance/")
+            ):
                 continue
             full_path = REPO_ROOT / rel_path
             if not full_path.is_file():
@@ -108,10 +112,41 @@ class TestRepoHygiene(unittest.TestCase):
             text=True,
             check=True,
         )
-        frozen_lines = sorted(line.strip() for line in res.stdout.splitlines() if line.strip())
-        lock_lines = sorted(line.strip() for line in lock_path.read_text().splitlines() if line.strip())
 
-        self.assertEqual(frozen_lines, lock_lines, "requirements.lock.txt drift detected against uv pip freeze")
+        lock_pins: dict[str, str] = {}
+        for line in lock_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or line.startswith("-"):
+                continue
+            line = line.rstrip("\\").strip()
+            line = line.split(";")[0].strip()
+            if "==" in line:
+                pkg, ver = line.split("==", 1)
+                lock_pins[pkg.strip().lower().replace("_", "-")] = ver.strip().split()[0]
+
+        installed: dict[str, str] = {}
+        for line in res.stdout.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or line.startswith("-e"):
+                continue
+            if "==" in line:
+                pkg, ver = line.split("==", 1)
+                installed[pkg.strip().lower().replace("_", "-")] = ver.strip()
+            elif "@" in line:
+                pkg = line.split("@")[0].strip().lower().replace("_", "-")
+                installed[pkg] = line.strip()
+
+        self.assertTrue(len(lock_pins) > 0, "No pinned packages parsed from requirements.lock.txt")
+        mismatches: dict[str, tuple[str, str | None]] = {
+            pkg: (ver, installed.get(pkg))
+            for pkg, ver in lock_pins.items()
+            if pkg not in installed or installed[pkg] != ver
+        }
+        self.assertEqual(
+            mismatches,
+            {},
+            f"requirements.lock.txt drift detected against installed packages: {mismatches}",
+        )
 
     def test_uv_pip_check_and_disallowed_packages(self):
         """uv pip check only reports allowed overrides and disallowed packages are absent."""

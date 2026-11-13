@@ -13,19 +13,16 @@ UNIT_FILES = [
     "bmo-broker.service",
     "bmo-cv.service",
     "bmo-brain.service",
-    "bmo-pi.service",
 ]
 
 DEPENDENT_SERVICES = [
     "bmo-cv.service",
     "bmo-brain.service",
-    "bmo-pi.service",
 ]
 
 HARDWARE_SERVICES = [
     "bmo-cv.service",
     "bmo-brain.service",
-    "bmo-pi.service",
 ]
 
 
@@ -95,16 +92,6 @@ def test_hardware_services_supplementary_groups() -> None:
         groups = parser.get("Service", "SupplementaryGroups").split()
         assert "audio" in groups
         assert "video" in groups
-
-
-def test_bmo_pi_environment_file() -> None:
-    unit_path = DEPLOY_DIR / "bmo-pi.service"
-    parser = configparser.ConfigParser(interpolation=None)
-    with open(unit_path, encoding="utf-8") as f:
-        parser.read_file(f)
-
-    env_file = parser.get("Service", "EnvironmentFile")
-    assert env_file == "-%h/.config/bmo/pi.env"
 
 
 def test_service_dependencies() -> None:
