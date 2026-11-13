@@ -21,7 +21,7 @@ _OBJECT_PATTERNS = [
     r"\bwhat\s+(?:am|are)\s+(?:i|you|we)\s+(?:holding|wearing|carrying)\b",
     r"\bwhat(?:'s| is)\s+(?:this|that|in my hand|in my hands)\b",
     r"\b(?:holding|holding up|in my hand|in my hands)\b",
-    r"\b(?:object|objects|item|items|thing|things)\b",
+    r"\b(?:object|objects|item|items|thing|things|something|anything)\b",
     r"\bon\s+the\s+(?:table|desk|screen|floor|shelf)\b",
     r"\bwhat\s+(?:color|colour)\b",
     r"\b(?:book|cup|phone|bottle|box|bag|key|keys|laptop|pen)\b",
@@ -69,6 +69,8 @@ def vision_target(text: str) -> Target | None:
         return "people"
     if wants_objects:
         return "objects"
+    if re.search(r"\bidentify\s+(?:this|that)\b", text, re.IGNORECASE):
+        return "both"
     return None
 
 

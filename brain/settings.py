@@ -67,8 +67,6 @@ class PolicySettings(BaseModel):
     greeting_cooldown_s: float
     global_cooldown_s: float
     walk_by_window_s: float
-    sign_min_conf: float
-    sign_debounce_s: float
     idle_unload_s: float
     tick_interval_s: float = 1.0
 

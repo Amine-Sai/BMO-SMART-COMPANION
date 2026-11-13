@@ -40,7 +40,7 @@ class IdleLifecycleManager:
         self._last_active_ts = self._clock()
         if self.sleeping:
             self.sleeping = False
-            self._vision_client.set_modules(face=True, sign=True)
+            self._vision_client.set_modules(face=True)
             self._llm_client.prewarm()
             return True
         return False
@@ -59,7 +59,7 @@ class IdleLifecycleManager:
             return False
         if not self.sleeping and (now - self._last_active_ts) >= self._settings.idle_unload_s:
             self.sleeping = True
-            self._vision_client.set_modules(face=False, sign=False)
+            self._vision_client.set_modules(face=False)
             self._llm_client.unload()
             return True
         return False

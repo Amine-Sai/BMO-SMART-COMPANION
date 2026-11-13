@@ -8,6 +8,16 @@ emotions:
   - sleepy
   - wink
   - error
+  - angry
+  - mad
+  - annoyed
+  - playful
+  - love
+  - kiss
+  - excited
+  - amazed
+  - terrified
+  - empathetic
 servos:
   pan:
     min_deg: -60.0

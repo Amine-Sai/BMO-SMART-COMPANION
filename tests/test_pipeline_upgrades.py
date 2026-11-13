@@ -91,16 +91,13 @@ class TestShortTermMemory(unittest.TestCase):
             {"label": "cup", "conf": 0.80, "bbox": (100, 300, 150, 360), "id": None},
         ]
         mem.update(objects, frame_shape=(480, 640))
-        mem.record_sign("HELLO", 0.95, signer="Alice")
 
         ctx = mem.get_llm_context()
         self.assertIn("Alice", ctx["summary"])
         self.assertIn("cup", ctx["summary"])
-        self.assertIn("HELLO", ctx["summary"])
         self.assertEqual(len(ctx["current_persons"]), 1)
         self.assertEqual(ctx["current_persons"][0]["identity"], "Alice")
         self.assertEqual(ctx["current_persons"][0]["position"], "center")
-        self.assertEqual(len(ctx["recent_signs"]), 1)
 
     def test_spatial_helpers(self):
         self.assertEqual(get_screen_position((20, 20, 100, 100), frame_w=640), "left")
@@ -177,29 +174,29 @@ class TestEventDetectorDebounce(unittest.TestCase):
         person_obj = [{"label": "person", "conf": 0.9, "bbox": (10, 10, 100, 200)}]
 
         # Frame 1: 1 person appears -> pending (no event yet)
-        self.detector.update(objects=person_obj, faces=[], sign=None, sign_conf=0.0)
+        self.detector.update(objects=person_obj, faces=[])
         self.assertEqual(len(self.emitted), 0)
 
         # Frame 2: 1 person still present -> confirmed (person_detected emitted)
-        self.detector.update(objects=person_obj, faces=[], sign=None, sign_conf=0.0)
+        self.detector.update(objects=person_obj, faces=[])
         self.assertEqual(len(self.emitted), 1)
         self.assertEqual(self.emitted[0][0], "person_detected")
         self.assertEqual(self.emitted[0][1]["count"], 1)
 
         # Frame 3: momentary 1-frame dropout -> absorbed by debounce (no event emitted)
-        self.detector.update(objects=[], faces=[], sign=None, sign_conf=0.0)
+        self.detector.update(objects=[], faces=[])
         self.assertEqual(len(self.emitted), 1)
 
         # Frame 4: person restored -> absorbed, stable count remains 1
-        self.detector.update(objects=person_obj, faces=[], sign=None, sign_conf=0.0)
+        self.detector.update(objects=person_obj, faces=[])
         self.assertEqual(len(self.emitted), 1)
 
         # Frame 5: person truly leaves -> pending
-        self.detector.update(objects=[], faces=[], sign=None, sign_conf=0.0)
+        self.detector.update(objects=[], faces=[])
         self.assertEqual(len(self.emitted), 1)
 
         # Frame 6: person truly gone -> confirmed (person_left emitted)
-        self.detector.update(objects=[], faces=[], sign=None, sign_conf=0.0)
+        self.detector.update(objects=[], faces=[])
         self.assertEqual(len(self.emitted), 2)
         self.assertEqual(self.emitted[1][0], "person_left")
         self.assertEqual(self.emitted[1][1]["count"], 0)
@@ -208,20 +205,20 @@ class TestEventDetectorDebounce(unittest.TestCase):
         lighter_obj = [{"label": "lighter", "conf": 0.85, "bbox": (50, 50, 80, 120)}]
 
         # Frame 1: lighter appears -> pending
-        self.detector.update(objects=lighter_obj, faces=[], sign=None, sign_conf=0.0)
+        self.detector.update(objects=lighter_obj, faces=[])
         self.assertEqual(len(self.emitted), 0)
 
         # Frame 2: lighter still present -> confirmed (object_seen emitted)
-        self.detector.update(objects=lighter_obj, faces=[], sign=None, sign_conf=0.0)
+        self.detector.update(objects=lighter_obj, faces=[])
         self.assertEqual(len(self.emitted), 1)
         self.assertEqual(self.emitted[0][0], "object_seen")
         self.assertEqual(self.emitted[0][1]["label"], "lighter")
         self.assertEqual(self.emitted[0][1]["count"], 1)
 
         # Frame 3 & 4: lighter removed -> confirmed (object_removed emitted)
-        self.detector.update(objects=[], faces=[], sign=None, sign_conf=0.0)
+        self.detector.update(objects=[], faces=[])
         self.assertEqual(len(self.emitted), 1)
-        self.detector.update(objects=[], faces=[], sign=None, sign_conf=0.0)
+        self.detector.update(objects=[], faces=[])
         self.assertEqual(len(self.emitted), 2)
         self.assertEqual(self.emitted[1][0], "object_removed")
         self.assertEqual(self.emitted[1][1]["label"], "lighter")
@@ -231,12 +228,10 @@ class TestDecoupledDetectionCadence(unittest.TestCase):
     """Test object detection frame-stride decoupling logic."""
 
     def test_default_stride(self):
-        from assistant_cv.config import OBJ_FRAME_STRIDE
         # Default changed to 1 for better detection on CPU
         self.assertEqual(OBJ_FRAME_STRIDE, 1)
 
     def test_stride_cadence_simulation(self):
-        from assistant_cv.config import OBJ_FRAME_STRIDE
         cached_detections = []
         detector_invocations = 0
 

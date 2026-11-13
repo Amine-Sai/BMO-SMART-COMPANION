@@ -12,10 +12,9 @@ flowchart TD
         CAM[Camera Frame Loop]
         YOLO[Object Detection]
         FACE[Face Identification]
-        SIGN[Sign Language Recognition]
         MEM[Scene Memory Cache]
-        CAM --> YOLO & FACE & SIGN
-        YOLO & FACE & SIGN --> MEM
+        CAM --> YOLO & FACE
+        YOLO & FACE --> MEM
     end
 
     subgraph Messaging [MQTT Broker]
@@ -27,12 +26,11 @@ flowchart TD
         SM[BrainStateMachine]
         TURN[TurnManager & Audio Pipeline]
         POL[ProactivePolicy]
-        SIGN_IN[SignInputHandler]
         EDGE_MON[EdgeMonitor & Audio Fallback]
         TOOLS[Allowlisted Tool Registry]
         LLM[Local LLM Client]
 
-        B_MAIN --> SM & TURN & POL & SIGN_IN & EDGE_MON & TOOLS & LLM
+        B_MAIN --> SM & TURN & POL & EDGE_MON & TOOLS & LLM
     end
 
     subgraph Edge Body [bmo-pi & ESP32]
@@ -58,8 +56,8 @@ All topic constants are centralized in `bmo_contracts.topics` and payload models
 | Topic Constant | Topic Path | Direction / Role | QoS | Retain | Description |
 |---|---|---|:---:|:---:|---|
 | `VISION_STATUS` | `bmo/vision/status` | cv → all (`brain`, `pi`) | 1 | Yes | Camera subsystem online status (with LWT) |
-| `VISION_EVENTS` | `bmo/vision/events` | cv → `brain` | 1 | No | Discrete perception events (face, person, sign, object) |
-| `VISION_CONTEXT` | `bmo/vision/context` | cv → `brain` | 0 | Yes | Current scene summary context (people, objects, sign) |
+| `VISION_EVENTS` | `bmo/vision/events` | cv → `brain` | 1 | No | Discrete perception events (face, person, object) |
+| `VISION_CONTEXT` | `bmo/vision/context` | cv → `brain` | 0 | Yes | Current scene summary context (people, objects) |
 | `VISION_CMD` | `bmo/vision/cmd` | `brain` → cv | 1 | No | Vision management commands (`enroll`, `forget`, etc.) |
 | `VISION_CMD_RESULT` | `bmo/vision/cmd_result` | cv → `brain` | 1 | No | Handshake reply for vision commands |
 | `BRAIN_STATUS` | `bmo/brain/status` | `brain` → all (`cv`, `pi`) | 1 | Yes | Brain state (`idle`, `listening`, `thinking`, `speaking`, `muted`) |

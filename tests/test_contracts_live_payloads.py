@@ -32,7 +32,6 @@ from bmo_contracts.models import (  # noqa: E402
     HwCmd,
     Scene,
     ScenePerson,
-    LastSign,
     VisionCmdResult,
     VisionStatus,
     parse_event_json,
@@ -40,8 +39,6 @@ from bmo_contracts.models import (  # noqa: E402
 )
 from bmo_contracts.topics import (  # noqa: E402
     HW_CMD,
-    HW_EVENT,
-    HW_STATUS,
     VISION_CMD_RESULT,
     VISION_CONTEXT,
     VISION_STATUS,
@@ -50,7 +47,6 @@ from bmo_contracts.topics import (  # noqa: E402
 )
 from brain.tools.actuator_tools import ActuatorTools, load_limits  # noqa: E402
 from edge.pi_client import PiClient  # noqa: E402
-from edge.emotions import render_face_frame  # noqa: E402
 from tools.simple_broker import SimpleMQTTBroker, parse_passwords_file  # noqa: E402
 
 
@@ -128,7 +124,6 @@ def test_mqttbridge_publish_scene_validates_against_contract() -> None:
             {"track_id": 1, "name": "Finn", "pos": "center", "proximity": "near", "since_s": 10.0}
         ],
         "objects": ["cup", "book"],
-        "last_sign": {"text": "wave", "age_s": 5.0},
         "recent": ["face_identified:Finn", "object_seen:cup"],
     }
 
@@ -148,8 +143,6 @@ def test_mqttbridge_publish_scene_validates_against_contract() -> None:
     assert len(validated_scene.people) == 1
     assert validated_scene.people[0].name == "Finn"
     assert validated_scene.objects == ["cup", "book"]
-    assert validated_scene.last_sign is not None
-    assert validated_scene.last_sign.text == "wave"
     assert "face_identified:Finn" in validated_scene.recent
 
     # Invalid scene (missing required field) - should log error but not crash
@@ -426,7 +419,6 @@ def test_full_integration_mqttbridge_to_piclient_via_broker() -> None:
             ts=time.time(),
             people=[ScenePerson(track_id=1, name="Test", pos="center", proximity="near", since_s=0.0)],
             objects=["test_obj"],
-            last_sign=LastSign(text="wave", age_s=1.0),
             recent=[],
         )
         bridge.publish_scene(scene.model_dump())
@@ -484,8 +476,6 @@ def test_event_parsing_via_event_adapter() -> None:
         FaceData,
         PersonDetected,
         PersonData,
-        SignRecognized,
-        SignData,
         ObjectSeen,
         ObjectData,
     )
@@ -509,16 +499,6 @@ def test_event_parsing_via_event_adapter() -> None:
     parsed = EVENT_ADAPTER.validate_python(person.model_dump())
     assert isinstance(parsed, PersonDetected)
     assert parsed.data.pos == "left"
-
-    # SignRecognized
-    sign = SignRecognized(
-        id="evt-3",
-        ts=time.time(),
-        data=SignData(text="wave", conf=0.9),
-    )
-    parsed = EVENT_ADAPTER.validate_python(sign.model_dump())
-    assert isinstance(parsed, SignRecognized)
-    assert parsed.data.text == "wave"
 
     # ObjectSeen
     obj = ObjectSeen(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from bmo_contracts.models import LastSign, Scene, ScenePerson, VisionStatus
+from bmo_contracts.models import Scene, ScenePerson, VisionStatus
 from brain.scene import SceneCache
 from brain.settings import SceneSettings
 from brain.tools.registry import ToolRegistry
@@ -42,7 +42,6 @@ def _make_scene(objects: list[str], people: list[ScenePerson]) -> Scene:
 
 
 def test_scene_tools_fresh() -> None:
-    assert LastSign is not None
     current_time = [100.0]
     cache = _make_scene_cache(lambda: current_time[0], max_age_s=5.0)
 

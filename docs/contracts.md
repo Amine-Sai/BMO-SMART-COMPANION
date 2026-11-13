@@ -107,21 +107,7 @@ All contract payloads are validated using Pydantic v2 with strict schema enforce
 }
 ```
 
-### 8. SignRecognized Event (`bmo/vision/events`)
-```json
-{
-  "v": 1,
-  "id": "evt-000004",
-  "ts": 1700000004.567,
-  "type": "sign_recognized",
-  "data": {
-    "text": "hello",
-    "conf": 0.92
-  }
-}
-```
-
-### 9. ObjectSeen Event (`bmo/vision/events`)
+### 8. ObjectSeen Event (`bmo/vision/events`)
 ```json
 {
   "v": 1,
@@ -135,7 +121,7 @@ All contract payloads are validated using Pydantic v2 with strict schema enforce
 }
 ```
 
-### 10. Scene Context (`bmo/vision/context`)
+### 9. Scene Context (`bmo/vision/context`)
 ```json
 {
   "ts": 1700000006.789,
@@ -149,19 +135,14 @@ All contract payloads are validated using Pydantic v2 with strict schema enforce
     }
   ],
   "objects": ["cup", "bottle"],
-  "last_sign": {
-    "text": "hello",
-    "age_s": 3.2
-  },
   "recent": [
     "person detected (track: 1)",
-    "face identified: Alice",
-    "sign: hello"
+    "face identified: Alice"
   ]
 }
 ```
 
-### 11. VisionCmd (`bmo/vision/cmd`)
+### 10. VisionCmd (`bmo/vision/cmd`)
 ```json
 {
   "id": "cmd-001",
@@ -170,7 +151,7 @@ All contract payloads are validated using Pydantic v2 with strict schema enforce
 }
 ```
 
-### 12. VisionCmdResult (`bmo/vision/cmd_result`)
+### 11. VisionCmdResult (`bmo/vision/cmd_result`)
 ```json
 {
   "id": "cmd-001",
@@ -179,7 +160,7 @@ All contract payloads are validated using Pydantic v2 with strict schema enforce
 }
 ```
 
-### 13. BrainSay (`bmo/brain/say`)
+### 12. BrainSay (`bmo/brain/say`)
 ```json
 {
   "utt_id": "utt-001",
@@ -188,7 +169,7 @@ All contract payloads are validated using Pydantic v2 with strict schema enforce
 }
 ```
 
-### 14. HwCmd (`bmo/hw/cmd`)
+### 13. HwCmd (`bmo/hw/cmd`)
 ```json
 {
   "id": "hw-001",

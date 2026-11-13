@@ -20,36 +20,6 @@ BMO_MAGENTA = (210, 100, 240)
 BMO_WHITE = (245, 250, 245)
 BMO_GRAY = (120, 130, 120)
 
-# Standard 21-point MediaPipe hand bone connections
-HAND_CONNECTIONS: tuple[tuple[int, int], ...] = (
-    # Thumb
-    (0, 1),
-    (1, 2),
-    (2, 3),
-    (3, 4),
-    # Index finger
-    (0, 5),
-    (5, 6),
-    (6, 7),
-    (7, 8),
-    # Middle finger
-    (5, 9),
-    (9, 10),
-    (10, 11),
-    (11, 12),
-    # Ring finger
-    (9, 13),
-    (13, 14),
-    (14, 15),
-    (15, 16),
-    # Pinky finger & palm base
-    (13, 17),
-    (0, 17),
-    (17, 18),
-    (18, 19),
-    (19, 20),
-)
-
 _FONT = cv2.FONT_HERSHEY_SIMPLEX
 
 
@@ -245,185 +215,6 @@ def draw_faces(frame: np.ndarray, faces: Iterable[Any] | None) -> np.ndarray:
         color = BMO_GREEN if is_known else BMO_RED
         tag = f"ID: {name} ({score:.2f})"
         draw_corner_box(frame, bbox, color, thickness=2, corner_len=14, label=tag)
-
-    return frame
-
-
-def draw_hand_skeleton(frame: np.ndarray, hands_data: Any) -> np.ndarray:
-    """Draw 21-point MediaPipe hand skeletons for Left (BMO_CYAN) and Right (BMO_MAGENTA)."""
-    if frame is None or hands_data is None:
-        return frame
-
-    h, w = frame.shape[:2]
-
-    # Normalize hands_data into a sequence of (hand_array, side_label, color)
-    hands_list: list[tuple[np.ndarray, str, tuple[int, int, int]]] = []
-
-    if isinstance(hands_data, np.ndarray):
-        arr = hands_data
-        if arr.ndim == 1 and arr.size == 126:
-            arr = arr.reshape(2, 21, 3)
-        elif arr.ndim == 2 and arr.shape[0] == 21:
-            arr = arr[np.newaxis, ...]
-
-        if arr.ndim == 3 and arr.shape[1] == 21:
-            for idx in range(min(2, arr.shape[0])):
-                side = "L" if idx == 0 else "R"
-                color = BMO_CYAN if idx == 0 else BMO_MAGENTA
-                hands_list.append((arr[idx], side, color))
-    elif isinstance(hands_data, (list, tuple)):
-        for idx, elem in enumerate(hands_data[:2]):
-            if elem is None:
-                continue
-            arr = np.asarray(elem, dtype=np.float32)
-            if arr.ndim == 2 and arr.shape[0] == 21:
-                side = "L" if idx == 0 else "R"
-                color = BMO_CYAN if idx == 0 else BMO_MAGENTA
-                hands_list.append((arr, side, color))
-
-    for hand, side, color in hands_list:
-        if not np.any(hand):
-            continue
-
-        xy = hand[:, :2]
-        # Convert normalized [0..1] coordinates to pixel ints if needed
-        if float(np.max(np.abs(xy))) <= 1.5:
-            pts = np.column_stack((xy[:, 0] * w, xy[:, 1] * h)).astype(np.int32)
-        else:
-            pts = xy.astype(np.int32)
-
-        # Draw bone connections
-        for i, j in HAND_CONNECTIONS:
-            p1 = (int(pts[i, 0]), int(pts[i, 1]))
-            p2 = (int(pts[j, 0]), int(pts[j, 1]))
-            cv2.line(frame, p1, p2, color, 2, cv2.LINE_AA)
-
-        # Draw joint dots
-        for idx_pt in range(pts.shape[0]):
-            px, py = int(pts[idx_pt, 0]), int(pts[idx_pt, 1])
-            radius = 4 if idx_pt in (0, 4, 8, 12, 16, 20) else 3
-            cv2.circle(frame, (px, py), radius, BMO_WHITE, -1, cv2.LINE_AA)
-            cv2.circle(frame, (px, py), radius, color, 1, cv2.LINE_AA)
-
-        # Place "L" or "R" tag near wrist (point 0)
-        wx, wy = int(pts[0, 0]), int(pts[0, 1])
-        tag_x = max(4, min(w - 26, wx + 8))
-        tag_y = max(18, min(h - 6, wy + 6))
-        _blend_rect(frame, tag_x - 3, tag_y - 14, tag_x + 16, tag_y + 4, BMO_DARK, 0.75)
-        cv2.rectangle(
-            frame,
-            (tag_x - 3, tag_y - 14),
-            (tag_x + 16, tag_y + 4),
-            color,
-            1,
-            cv2.LINE_AA,
-        )
-        cv2.putText(
-            frame,
-            side,
-            (tag_x + 1, tag_y - 1),
-            _FONT,
-            0.45,
-            color,
-            1,
-            cv2.LINE_AA,
-        )
-
-    return frame
-
-
-def draw_sign_gauge(
-    frame: np.ndarray,
-    buf_len: int,
-    seq_len: int = 30,
-    active_sign: str | None = None,
-    sign_conf: float = 0.0,
-) -> np.ndarray:
-    """Draw the bottom-right sign buffer progress gauge and centered active sign banner."""
-    if frame is None:
-        return frame
-
-    h, w = frame.shape[:2]
-    seq_max = max(1, int(seq_len))
-    cur_len = max(0, min(seq_max, int(buf_len)))
-    ratio = cur_len / float(seq_max)
-
-    # Bottom-right gauge panel
-    panel_w, panel_h = 200, 48
-    margin = 12
-    px2 = w - margin
-    px1 = max(0, px2 - panel_w)
-    py2 = h - margin
-    py1 = max(0, py2 - panel_h)
-
-    _blend_rect(frame, px1, py1, px2, py2, BMO_DARK, alpha=0.72)
-    cv2.rectangle(frame, (px1, py1), (px2, py2), BMO_TEAL, 1, cv2.LINE_AA)
-
-    label_text = f"SIGN BUF: {cur_len}/{seq_max}"
-    cv2.putText(
-        frame,
-        label_text,
-        (px1 + 10, py1 + 18),
-        _FONT,
-        0.44,
-        BMO_WHITE,
-        1,
-        cv2.LINE_AA,
-    )
-
-    # Segmented progress bar inside panel
-    bar_x1 = px1 + 10
-    bar_x2 = px2 - 10
-    bar_y1 = py1 + 26
-    bar_y2 = py2 - 8
-    bar_w = max(1, bar_x2 - bar_x1)
-
-    cv2.rectangle(frame, (bar_x1, bar_y1), (bar_x2, bar_y2), BMO_GRAY, 1, cv2.LINE_AA)
-    fill_w = int(round((bar_w - 2) * ratio))
-    if fill_w > 0:
-        bar_color = BMO_GREEN if cur_len >= seq_max else BMO_CYAN
-        cv2.rectangle(
-            frame,
-            (bar_x1 + 1, bar_y1 + 1),
-            (bar_x1 + 1 + fill_w, bar_y2 - 1),
-            bar_color,
-            -1,
-        )
-
-    # Prominent centered banner when active_sign is truthy and != "none"
-    if active_sign and str(active_sign).strip().lower() != "none":
-        sign_str = str(active_sign).strip().upper()
-        conf_val = float(sign_conf or 0.0)
-        pct = conf_val * 100.0 if conf_val <= 1.0 else conf_val
-        if conf_val > 0.0:
-            banner_text = f"SIGN: {sign_str}  {pct:.0f}%"
-        else:
-            banner_text = f"SIGN: {sign_str}"
-
-        font_scale = 0.72
-        font_thick = 2
-        (tw, th), baseline = cv2.getTextSize(banner_text, _FONT, font_scale, font_thick)
-        pad_x, pad_y = 18, 10
-        bw = tw + pad_x * 2
-        bh = th + baseline + pad_y * 2
-
-        bx1 = max(0, (w - bw) // 2)
-        bx2 = min(w, bx1 + bw)
-        by2 = h - 18
-        by1 = max(0, by2 - bh)
-
-        _blend_rect(frame, bx1, by1, bx2, by2, BMO_DARK, alpha=0.82)
-        cv2.rectangle(frame, (bx1, by1), (bx2, by2), BMO_GREEN, 2, cv2.LINE_AA)
-        cv2.putText(
-            frame,
-            banner_text,
-            (bx1 + pad_x, by1 + pad_y + th),
-            _FONT,
-            font_scale,
-            BMO_GREEN,
-            font_thick,
-            cv2.LINE_AA,
-        )
 
     return frame
 
@@ -717,23 +508,11 @@ def render_hud(
             faces_data = [raw_face]
     draw_faces(frame, faces_data)
 
-    # 3. Hand landmarks skeleton
-    draw_hand_skeleton(frame, st.get("raw_hands"))
-
-    # 4. Sign buffer gauge & active sign banner
-    draw_sign_gauge(
-        frame,
-        buf_len=int(st.get("sign_buf", 0) or 0),
-        seq_len=int(st.get("seq_len", 30) or 30),
-        active_sign=st.get("sign"),
-        sign_conf=float(st.get("sign_conf", 0.0) or 0.0),
-    )
-
-    # 5. Event feed
+    # 3. Event feed
     ev = events if events is not None else st.get("events")
     draw_event_feed(frame, ev)
 
-    # 6. Auto-enroll banner overlay if active
+    # 4. Auto-enroll banner overlay if active
     if st.get("auto_enroll"):
         draw_auto_enroll_overlay(frame, st.get("auto_enroll"))
     if st.get("auto_object_enroll"):

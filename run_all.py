@@ -9,6 +9,7 @@ CLI is used only for text input to the LLM.
 import logging
 import os
 import subprocess
+import uuid
 import warnings
 import threading
 import time
@@ -20,12 +21,14 @@ from pathlib import Path
 
 import paho.mqtt.client as mqtt
 
-from bmo_contracts.models import Scene, VisionStatus
-from bmo_contracts.topics import VISION_CONTEXT, VISION_STATUS, VISION_CMD
-from brain.vision_intent import vision_target
-from brain.emotions import EmotionTagStreamFilter, strip_emotion_tag
+from bmo_contracts.models import BrainSay, Emotion, Scene
+from bmo_contracts.topics import BRAIN_SAY, BRAIN_STATUS, VISION_CONTEXT, VISION_STATUS, VISION_CMD
+from brain.state import BrainState
+from brain.turn import resolve_vision_target
+from brain.emotions import EmotionTagStreamFilter, split_emotion_tag, strip_emotion_tags
 from brain.memory_extract import apply_memory_effects
 from brain.tools.registry import needs_tools
+from face_ui.signal import FaceSignal, default_path
 
 warnings.filterwarnings("ignore", category=FutureWarning, module="torch")
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="sounddevice")
@@ -39,8 +42,11 @@ logger = logging.getLogger(__name__)
 
 # Component processes
 _broker_proc = None
+_broker_log_file = None
 _cv_proc = None
 _cv_log_file = None
+_face_proc = None
+_face_log_file = None
 _brain_thread = None
 _text_thread = None
 _scene_sub_client = None
@@ -50,28 +56,81 @@ _tts_active = threading.Event()
 _tts_quiet_until = 0.0
 
 
-def start_mqtt_broker():
-    """Verify mosquitto is reachable on 127.0.0.1:1883.
-
-    Returns None (no subprocess to manage; mosquitto is started externally).
-    """
-    global _broker_proc
-    _broker_proc = None
+def _broker_reachable(timeout_s: float = 0.5) -> bool:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        s.settimeout(2.0)
+        s.settimeout(timeout_s)
         s.connect(("127.0.0.1", 1883))
-        logger.info("MQTT broker (mosquitto) reachable on 127.0.0.1:1883")
-    except OSError as exc:
-        logger.warning("MQTT broker not reachable on 127.0.0.1:1883: %s", exc)
+        return True
+    except OSError:
+        return False
     finally:
         s.close()
-    return None
+
+
+def start_mqtt_broker():
+    """Ensure a local mosquitto broker is listening on 127.0.0.1:1883.
+
+    Starts one automatically when it is installed but not running, so CV and
+    the brain can always exchange scenes. A broker started here is stopped on
+    shutdown; an externally managed broker is left alone.
+    """
+    global _broker_proc, _broker_log_file
+    _broker_proc = None
+    _broker_log_file = None
+    if _broker_reachable():
+        logger.info("MQTT broker (mosquitto) reachable on 127.0.0.1:1883")
+        return
+
+    log_dir = Path(__file__).parent / "logs"
+    log_dir.mkdir(exist_ok=True)
+    log_path = log_dir / "mosquitto.log"
+    try:
+        _broker_log_file = open(log_path, "a", encoding="utf-8")
+        _broker_proc = subprocess.Popen(
+            ["mosquitto", "-p", "1883"],
+            stdout=_broker_log_file,
+            stderr=subprocess.STDOUT,
+        )
+    except FileNotFoundError:
+        logger.error("mosquitto is not installed; CV scenes cannot reach the brain")
+        return
+    except Exception as exc:
+        logger.error("Failed to start mosquitto: %s", exc)
+        return
+
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        if _broker_proc.poll() is not None:
+            logger.error("mosquitto exited during startup (see %s)", log_path)
+            return
+        if _broker_reachable():
+            logger.info("Started mosquitto on 127.0.0.1:1883")
+            return
+        time.sleep(0.05)
+    logger.error("mosquitto did not become reachable (see %s)", log_path)
 
 
 def stop_mqtt_broker():
-    """No-op: mosquitto is managed externally."""
-    pass
+    """Stop the mosquitto process only if this run started it."""
+    global _broker_proc, _broker_log_file
+    proc = _broker_proc
+    _broker_proc = None
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.terminate()
+            proc.wait(timeout=3.0)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    if _broker_log_file is not None:
+        try:
+            _broker_log_file.close()
+        except Exception:
+            pass
+        _broker_log_file = None
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +197,7 @@ def _scene_has_target(scene, target: str) -> bool:
     return len(people) > 0 or len(objects) > 0
 
 
-def request_vision(scene_cache, target: str = "both", seconds: float = 6.0, timeout_s: float = 4.0) -> None:
+def request_vision(scene_cache, target: str = "both", seconds: float = 6.0, timeout_s: float = 6.0) -> None:
     """Ask the CV pipeline to look for a specific target, then wait for it.
 
     CV runs idle (no object detection) by default to keep the CPU free. A
@@ -148,9 +207,20 @@ def request_vision(scene_cache, target: str = "both", seconds: float = 6.0, time
     """
     client = _scene_sub_client
     if client is None:
+        logger.warning("Vision look skipped: scene subscriber is not connected")
         return
     before = scene_cache.last_update_time()
-    payload = json.dumps({"command": "look", "args": {"seconds": seconds, "target": target}})
+    request_id = uuid.uuid4().hex[:8]
+    payload = json.dumps(
+        {
+            "command": "look",
+            "args": {
+                "seconds": seconds,
+                "target": target,
+                "request_id": request_id,
+            },
+        }
+    )
     try:
         client.publish(VISION_CMD, payload, qos=1)
     except Exception as exc:
@@ -158,25 +228,71 @@ def request_vision(scene_cache, target: str = "both", seconds: float = 6.0, time
         return
 
     deadline = time.monotonic() + timeout_s
+    last_request = time.monotonic()
     while time.monotonic() < deadline and not _shutdown.is_set():
         if scene_cache.last_update_time() > before:
             scene = scene_cache.current()
             if _scene_has_target(scene, target):
                 logger.info("Fresh %s scene received for vision query", target)
                 return
+        # The CV process may still be loading its models when the first look is
+        # sent. Repeat it so the request is not lost before CV subscribes.
+        if time.monotonic() - last_request >= 1.0:
+            try:
+                client.publish(VISION_CMD, payload, qos=1)
+            except Exception:
+                pass
+            last_request = time.monotonic()
         time.sleep(0.05)
     logger.warning("No %s in fresh scene within %.1fs; answering with last known scene", target, timeout_s)
+
+
+def _kill_stale_cv() -> None:
+    """Terminate a leftover CV pipeline that may still hold the camera."""
+    try:
+        entries = list(Path("/proc").iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            cmdline = (entry / "cmdline").read_bytes()
+        except OSError:
+            continue
+        if b"assistant_cv.main" not in cmdline:
+            continue
+        pid = int(entry.name)
+        if pid == os.getpid():
+            continue
+        logger.warning("Stopping leftover CV process pid=%s", pid)
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            continue
+        for _ in range(40):
+            time.sleep(0.05)
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+        else:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
 
 
 def start_cv_process() -> None:
     """Start the CV pipeline as a separate process.
 
     Running it out-of-process keeps its chatty startup (and OpenCV/GTK) from
-    touching this process's stdout/window loop, and lets the on-demand camera
-    window live on the CV process's main thread.
+    touching this process's stdout/window loop. It runs headless, so a look
+    never opens a camera window over the face.
     """
     global _cv_proc, _cv_log_file
 
+    _kill_stale_cv()
     log_dir = Path(__file__).parent / "logs"
     log_dir.mkdir(exist_ok=True)
     cv_log_path = log_dir / "cv_pipeline.log"
@@ -227,9 +343,121 @@ def stop_cv_process() -> None:
         _cv_log_file = None
 
 
+def start_face_process() -> None:
+    """Start the BMO face window as a separate process.
+
+    The face polls the shared state file written by the brain (MQTT is only a
+    fallback), so it can be restarted independently. It is skipped when no
+    display is available or BMO_FACE_UI is set to a false-y value.
+    """
+    global _face_proc, _face_log_file
+
+    enabled = os.environ.get("BMO_FACE_UI")
+    if enabled is None:
+        enabled = "1" if os.environ.get("DISPLAY") else "0"
+    if enabled.strip().lower() in ("0", "false", "no", "off", ""):
+        logger.info("Face UI disabled (BMO_FACE_UI=%s, DISPLAY=%s)",
+                    enabled, os.environ.get("DISPLAY", "-"))
+        return
+
+    log_dir = Path(__file__).parent / "logs"
+    log_dir.mkdir(exist_ok=True)
+    face_log_path = log_dir / "face_ui.log"
+    _face_log_file = open(face_log_path, "a", encoding="utf-8")
+
+    # A leftover state file from the previous run must not wake the face on
+    # boot. It always starts asleep; the brain publishes a fresh idle status.
+    try:
+        default_path().unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        logger.warning("Could not clear stale face state: %s", exc)
+
+    size = os.environ.get("BMO_FACE_SIZE", "").strip()
+    try:
+        sleep_after_s = float(os.environ.get("BMO_FACE_SLEEP_S", "60"))
+    except ValueError:
+        sleep_after_s = 60.0
+    # BMO should stay awake for a full minute of inactivity; 0 still disables
+    # sleeping explicitly for kiosk/debug runs.
+    if 0 < sleep_after_s < 60.0:
+        logger.warning(
+            "BMO_FACE_SLEEP_S=%.1fs is too short; using 60s", sleep_after_s
+        )
+        sleep_after_s = 60.0
+    sleep_s = f"{sleep_after_s:g}"
+    cmd = [
+        sys.executable,
+        "-m",
+        "face_ui.main",
+        "--mqtt-host",
+        "127.0.0.1",
+        "--mqtt-port",
+        "1883",
+        "--sleep-after",
+        sleep_s,
+    ]
+    if size:
+        cmd.extend(["--size", size])
+    if os.environ.get("BMO_FACE_FULLSCREEN", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    ):
+        cmd.append("--fullscreen")
+    if os.environ.get("BMO_FACE_NOQUIT", "0").strip().lower() in ("1", "true", "yes", "on"):
+        cmd.append("--no-quit")
+    if os.environ.get("BMO_FACE_ART", "1").strip().lower() in ("0", "false", "no", "off"):
+        cmd.append("--no-art")
+    display = os.environ.get("BMO_FACE_DISPLAY")
+    if display:
+        cmd.extend(["--display", display])
+
+    child_env = os.environ.copy()
+    if display:
+        child_env["DISPLAY"] = display
+
+    logger.info("Starting face UI (output -> %s)", face_log_path)
+    try:
+        _face_proc = subprocess.Popen(
+            cmd,
+            cwd=str(Path(__file__).parent),
+            stdout=_face_log_file,
+            stderr=subprocess.STDOUT,
+            env=child_env,
+        )
+    except Exception as exc:
+        logger.error("Failed to start face UI: %s", exc)
+        _face_proc = None
+
+
+def stop_face_process() -> None:
+    global _face_proc, _face_log_file
+    proc = _face_proc
+    _face_proc = None
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.terminate()
+            proc.wait(timeout=5.0)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    if _face_log_file is not None:
+        try:
+            _face_log_file.close()
+        except Exception:
+            pass
+        _face_log_file = None
+
+
 def run_brain_voice(scene_cache) -> None:
     """Run the brain voice assistant in a thread."""
     logger.info("Starting Brain voice assistant...")
+    pub_client = None
     try:
         from brain.audio.io import AudioSettings, SoundDeviceSource, SoundDeviceSink
         from brain.audio.wake import WakeWordDetector, extract_wake_command
@@ -237,7 +465,6 @@ def run_brain_voice(scene_cache) -> None:
         from brain.audio.stt import SpeechToText
         from brain.audio.tts import TextToSpeech
         from brain.llm import LLMClient
-        from brain.scene import SceneCache
         from brain.state import BrainStateMachine
         from brain.prompt import PromptBuilder
         from brain.tools.registry import ToolRegistry
@@ -277,7 +504,43 @@ def run_brain_voice(scene_cache) -> None:
             logger.error("Piper voice not found at %s", PIPER_VOICE_PATH)
             return
 
-        state_machine = BrainStateMachine(lambda t, p, q, r: None)
+        face_signal = FaceSignal()
+
+        def publish_fn(topic, payload, qos=0, retain=False):
+            if pub_client is not None:
+                try:
+                    pub_client.publish(topic, payload, qos=qos, retain=retain)
+                except Exception:
+                    pass
+            try:
+                if topic == BRAIN_STATUS:
+                    data = json.loads(payload)
+                    face_signal.set_status(
+                        data.get("state", "idle"), bool(data.get("online", True))
+                    )
+                elif topic == BRAIN_SAY:
+                    data = json.loads(payload)
+                    face_signal.set_say(
+                        data.get("text", ""), data.get("emotion", "neutral")
+                    )
+            except Exception as exc:
+                logger.debug("Face signal update failed: %s", exc)
+
+        try:
+            pub_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+            pub_client.will_set(
+                BRAIN_STATUS,
+                BrainStateMachine.last_will_payload(),
+                qos=1,
+                retain=True,
+            )
+            pub_client.connect("127.0.0.1", 1883, keepalive=30)
+            pub_client.loop_start()
+            logger.info("Brain MQTT publisher connected")
+        except Exception as exc:
+            logger.warning("Brain MQTT publisher unavailable: %s", exc)
+
+        state_machine = BrainStateMachine(publish_fn)
         # The wake gate is handled by Whisper transcription below ("hey bmo"),
         # since openWakeWord has no BMO model. This detector is only passed to
         # TurnManager for interface compatibility and stays unused.
@@ -305,7 +568,11 @@ def run_brain_voice(scene_cache) -> None:
         register_scene_tools(tools, scene_cache)
         register_memory_tools(tools, memory)
 
-        audio_sink = SoundDeviceSink(audio_settings.sample_rate, device=audio_device)
+        audio_sink = SoundDeviceSink(
+            audio_settings.sample_rate,
+            device=audio_device,
+            speech_cb=face_signal.set_speech,
+        )
 
         # Confirm audio output works before entering the turn loop.
         try:
@@ -325,9 +592,45 @@ def run_brain_voice(scene_cache) -> None:
             tools=tools,
             tts=tts,
             sink=audio_sink,
-            publish_fn=lambda t, p, q, r: None,
+            publish_fn=publish_fn,
             vision_request_fn=lambda target: request_vision(scene_cache, target=target),
         )
+        state_machine.publish_current()
+
+        def _say_static(text: str, emotion: Emotion = Emotion.HAPPY) -> None:
+            """Speak a canned line (wake greeting) without calling the LLM."""
+            global _tts_quiet_until
+            if not text.strip():
+                return
+            _tts_active.set()
+            print(f"bmo: {text}", flush=True)
+            try:
+                if state_machine.state != BrainState.SPEAKING:
+                    try:
+                        state_machine.transition(BrainState.SPEAKING)
+                    except Exception:
+                        pass
+                try:
+                    say = BrainSay(
+                        utt_id=uuid.uuid4().hex[:8],
+                        text=text,
+                        emotion=emotion,
+                    )
+                    publish_fn(BRAIN_SAY, say.model_dump_json().encode("utf-8"), 1, False)
+                except Exception as exc:
+                    logger.warning("BrainSay publish failed: %s", exc)
+                tts.speak_sentence(text, audio_sink)
+                audio_sink.drain()
+            except Exception as exc:
+                logger.error("Static speech failed: %s", exc, exc_info=True)
+            finally:
+                _tts_active.clear()
+                _tts_quiet_until = time.monotonic() + 0.8
+                try:
+                    if state_machine.state == BrainState.SPEAKING:
+                        state_machine.transition(BrainState.IDLE)
+                except Exception:
+                    pass
 
         source = SoundDeviceSource(audio_settings.sample_rate)
 
@@ -384,9 +687,16 @@ def run_brain_voice(scene_cache) -> None:
             print(f'  heard {duration_s:.1f}s: "{heard}"  <- {tag}', flush=True)
             try:
                 if command:
-                    turn_manager.run_text_turn(command)
+                    try:
+                        if state_machine.state == BrainState.IDLE:
+                            state_machine.transition(BrainState.LISTENING)
+                    except Exception:
+                        pass
+                    turn_manager.run_text_turn(command, followup=in_followup)
                 else:
-                    turn_manager.listen_and_respond(source)
+                    # Bare wake word: answer immediately, then listen for the
+                    # actual request inside the follow-up window.
+                    _say_static("Hey there!")
                 followup_until = time.monotonic() + followup_s
             except Exception as exc:
                 logger.error("Turn failed: %s", exc, exc_info=True)
@@ -408,6 +718,12 @@ def run_brain_voice(scene_cache) -> None:
     except Exception as e:
         logger.error("Brain voice error: %s", e, exc_info=True)
     finally:
+        if pub_client is not None:
+            try:
+                pub_client.loop_stop()
+                pub_client.disconnect()
+            except Exception:
+                pass
         logger.info("Brain voice assistant stopped")
 
 
@@ -419,13 +735,25 @@ def run_text_input(turn_manager) -> None:
     """
     import sys
     import os
+    import uuid
     stdout = sys.__stdout__  # Use unbuffered original stdout (thread-safe)
     
     # Speak typed LLM replies by default; set BMO_TEXT_TTS=0 to disable.
     use_tts = os.environ.get("BMO_TEXT_TTS", "1") == "1"
     tts = turn_manager._tts
     sink = turn_manager._sink
-    
+    state_machine = turn_manager._state_machine
+    publisher = turn_manager._publish_fn
+
+    def _safe_transition(target: BrainState) -> None:
+        try:
+            state_machine.transition(target)
+        except Exception:
+            pass
+
+    last_vision_target: str | None = None
+    last_vision_at = 0.0
+
     while not _shutdown.is_set():
         try:
             line = input("> ")
@@ -450,8 +778,18 @@ def run_text_input(turn_manager) -> None:
                     logger.warning("memory update failed: %s", exc)
 
             # Ask CV for a fresh look before answering camera questions,
-            # enabling only the models relevant to the question.
-            target = vision_target(text)
+            # enabling only the models relevant to the question. Typed
+            # follow-ups ("is it red?") reuse the previous scene target too.
+            target = resolve_vision_target(
+                text,
+                followup=True,
+                last_target=last_vision_target,
+                last_at=last_vision_at,
+                now=time.monotonic(),
+            )
+            if target:
+                last_vision_target = target
+                last_vision_at = time.monotonic()
             if target and turn_manager._vision_request_fn is not None:
                 try:
                     turn_manager._vision_request_fn(target)
@@ -460,6 +798,7 @@ def run_text_input(turn_manager) -> None:
 
             # Stream LLM response immediately for text mode, stripping every
             # [emotion] tag (the model sometimes emits one per sentence).
+            _safe_transition(BrainState.THINKING)
             print("bmo: ", end="", flush=True, file=stdout)
             full_reply = []
             tag_filter = EmotionTagStreamFilter()
@@ -490,10 +829,29 @@ def run_text_input(turn_manager) -> None:
             _emit(tag_filter.flush())
             print(flush=True, file=stdout)
 
-            reply_text = strip_emotion_tag("".join(full_reply))
-            
+            raw_reply = "".join(full_reply)
+            reply_text = strip_emotion_tags(raw_reply)
+            emotion, _ = split_emotion_tag(raw_reply)
+            emotion = emotion or Emotion.NEUTRAL
+
             # Optionally speak the response via TTS
             if use_tts and tts is not None and sink is not None and reply_text.strip():
+                _safe_transition(BrainState.SPEAKING)
+                if publisher is not None:
+                    try:
+                        say = BrainSay(
+                            utt_id=uuid.uuid4().hex[:8],
+                            text=reply_text,
+                            emotion=emotion,
+                        )
+                        publisher(
+                            BRAIN_SAY,
+                            say.model_dump_json().encode("utf-8"),
+                            1,
+                            False,
+                        )
+                    except Exception as publish_exc:
+                        logger.warning("BrainSay publish failed: %s", publish_exc)
                 logger.info("Text input TTS: speaking reply (%d chars)", len(reply_text))
                 global _tts_quiet_until
                 _tts_active.set()
@@ -508,6 +866,7 @@ def run_text_input(turn_manager) -> None:
                 finally:
                     _tts_active.clear()
                     _tts_quiet_until = time.monotonic() + 0.8
+            _safe_transition(BrainState.IDLE)
             
             # Record turn in history
             turn_manager._prompt_builder.record_turn(text, reply_text)
@@ -515,7 +874,7 @@ def run_text_input(turn_manager) -> None:
             logger.error("Text input turn failed: %s", exc)
 
 
-def signal_handler(signum, frame):
+def signal_handler(_signum, _frame):
     """Handle shutdown signals."""
     logger.info("Shutdown signal received...")
     _shutdown.set()
@@ -540,6 +899,9 @@ def main():
     # 2. Start CV Pipeline (separate process)
     start_cv_process()
 
+    # 3. Start the BMO face display (separate process, MQTT-driven)
+    start_face_process()
+
     # Give CV time to connect to broker
     time.sleep(3)
 
@@ -557,9 +919,10 @@ def main():
         pass
     finally:
         _shutdown.set()
+        stop_cv_process()
+        stop_face_process()
         stop_scene_subscriber()
         stop_mqtt_broker()
-        stop_cv_process()
 
 
 if __name__ == "__main__":

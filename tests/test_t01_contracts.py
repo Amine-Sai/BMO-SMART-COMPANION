@@ -29,7 +29,6 @@ from bmo_contracts.models import (
     PlaySoundArgs,
     Scene,
     SetExpressionArgs,
-    SignRecognized,
     VisionCmd,
     VisionCmdResult,
     VisionStatus,
@@ -61,7 +60,7 @@ class TestSection43Examples(unittest.TestCase):
         sec_text = sec_match.group(0)
 
         self.json_blocks = re.findall(r"```json\s*(\{.*?\})\s*```", sec_text, re.DOTALL)
-        self.assertGreaterEqual(len(self.json_blocks), 14, "Expected at least 14 JSON examples in Section 4.3")
+        self.assertGreaterEqual(len(self.json_blocks), 13, "Expected at least 13 JSON examples in Section 4.3")
 
     def test_all_verbatim_examples_validate(self):
         """Validate each Section 4.3 verbatim JSON example against its corresponding model."""
@@ -101,36 +100,31 @@ class TestSection43Examples(unittest.TestCase):
         self.assertIsInstance(ev_pl, PersonLeft)
         self.assertEqual(ev_pl.data.track_id, 1)
 
-        # 8. SignRecognized Event
-        ev_sr = parse_event_json(self.json_blocks[7])
-        self.assertIsInstance(ev_sr, SignRecognized)
-        self.assertEqual(ev_sr.data.text, "hello")
-
-        # 9. ObjectSeen Event
-        ev_os = parse_event_json(self.json_blocks[8])
+        # 8. ObjectSeen Event
+        ev_os = parse_event_json(self.json_blocks[7])
         self.assertIsInstance(ev_os, ObjectSeen)
         self.assertEqual(ev_os.data.label, "cup")
 
-        # 10. Scene Context
-        scene = Scene.model_validate_json(self.json_blocks[9])
+        # 9. Scene Context
+        scene = Scene.model_validate_json(self.json_blocks[8])
         self.assertEqual(len(scene.people), 1)
         self.assertEqual(scene.people[0].name, "Alice")
         self.assertIn("cup", scene.objects)
 
-        # 11. VisionCmd
-        vc = VisionCmd.model_validate_json(self.json_blocks[10])
+        # 10. VisionCmd
+        vc = VisionCmd.model_validate_json(self.json_blocks[9])
         self.assertEqual(vc.cmd, "reload_gallery")
 
-        # 12. VisionCmdResult
-        vcr = VisionCmdResult.model_validate_json(self.json_blocks[11])
+        # 11. VisionCmdResult
+        vcr = VisionCmdResult.model_validate_json(self.json_blocks[10])
         self.assertTrue(vcr.ok)
 
-        # 13. BrainSay
-        bsay = BrainSay.model_validate_json(self.json_blocks[12])
+        # 12. BrainSay
+        bsay = BrainSay.model_validate_json(self.json_blocks[11])
         self.assertEqual(bsay.emotion, Emotion.HAPPY)
 
-        # 14. HwCmd
-        hwcmd = HwCmd.model_validate_json(self.json_blocks[13])
+        # 13. HwCmd
+        hwcmd = HwCmd.model_validate_json(self.json_blocks[12])
         self.assertEqual(hwcmd.target, "pi")
         self.assertEqual(hwcmd.action, "set_expression")
 
@@ -186,7 +180,6 @@ class TestShortTermMemorySceneContract(unittest.TestCase):
             {"label": "cup", "conf": 0.88, "bbox": (50, 50, 80, 80)},
         ]
         mem.update(detections, frame_shape=(480, 640))
-        mem.record_sign("HELLO", conf=0.94)
 
         sim_time = 1005.0
         scene_dict = mem.get_scene_contract()
@@ -199,9 +192,6 @@ class TestShortTermMemorySceneContract(unittest.TestCase):
         self.assertEqual(scene.people[0].proximity, "near")
         self.assertEqual(scene.people[0].since_s, 5.0)
         self.assertIn("cup", scene.objects)
-        self.assertIsNotNone(scene.last_sign)
-        self.assertEqual(scene.last_sign.text, "hello")
-        self.assertEqual(scene.last_sign.age_s, 5.0)
 
         # Token budget test: serialized JSON must be <= 300 tokens
         # Conservative token estimation: ~3.5 chars per token for English JSON
@@ -230,7 +220,6 @@ class TestMQTTBridgeContractConformance(unittest.TestCase):
             "ts": 1700000000.0,
             "people": [{"track_id": 1, "name": "Bob", "pos": "center", "proximity": "near", "since_s": 2.5}],
             "objects": ["bottle"],
-            "last_sign": None,
             "recent": ["person detected (track: 1)"],
         }
         self.bridge.publish_scene(scene_data)
@@ -264,19 +253,12 @@ class TestMQTTBridgeContractConformance(unittest.TestCase):
         self.assertIsInstance(ev2, FaceIdentified)
         self.assertEqual(ev2.data.name, "Alice")
 
-        # 3. sign_recognized
-        self.bridge.publish_event("sign_recognized", {"sign": "THANKS", "conf": 0.91})
+        # 3. object_seen
+        self.bridge.publish_event("object_seen", {"label": "pen", "conf": 0.85})
         self.assertEqual(len(self.published_messages), 3)
         ev3 = parse_event_json(self.published_messages[2][1])
-        self.assertIsInstance(ev3, SignRecognized)
-        self.assertEqual(ev3.data.text, "thanks")
-
-        # 4. object_seen
-        self.bridge.publish_event("object_seen", {"label": "pen", "conf": 0.85})
-        self.assertEqual(len(self.published_messages), 4)
-        ev4 = parse_event_json(self.published_messages[3][1])
-        self.assertIsInstance(ev4, ObjectSeen)
-        self.assertEqual(ev4.data.label, "pen")
+        self.assertIsInstance(ev3, ObjectSeen)
+        self.assertEqual(ev3.data.label, "pen")
 
     def test_topic_registry_coverage(self):
         """All 10 canonical topics exist in TOPICS registry with valid TopicSpec."""
@@ -446,7 +428,7 @@ class TestT1SchemaEnhancements(unittest.TestCase):
 
         # Invalid emotion rejected
         with self.assertRaises(ValidationError):
-            HwCmd(id="4", target="pi", action="set_expression", args={"emotion": "angry"})
+            HwCmd(id="4", target="pi", action="set_expression", args={"emotion": "bogus"})
 
         # Extra fields forbidden
         with self.assertRaises(ValidationError):

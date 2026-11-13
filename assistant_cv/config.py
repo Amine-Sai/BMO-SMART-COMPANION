@@ -3,7 +3,6 @@ import glob
 import json
 import os
 import pathlib
-import torch
 
 from bmo_contracts.topics import (
     VISION_CMD,
@@ -29,8 +28,6 @@ OBJ_FRAME_STRIDE = int(os.environ.get("BMO_OBJ_STRIDE", "1"))
 OBJ_CONF = float(os.environ.get("BMO_OBJ_CONF", "0.45"))
 FACE_TAU = float(os.environ.get("BMO_FACE_TAU", "0.45"))
 OBJECT_TAU = float(os.environ.get("BMO_OBJECT_TAU", "0.65"))
-SIGN_CONF = float(os.environ.get("BMO_SIGN_CONF", "0.90"))
-SEQ_LEN = 30
 
 # Object detection model & exterior vocabulary configuration
 OBJ_MODEL_TYPE = os.environ.get("BMO_OBJ_MODEL", "world").lower()
@@ -78,13 +75,6 @@ MQTT_TOPIC_EVENT = os.environ.get("BMO_MQTT_TOPIC_EVENT", VISION_EVENTS)
 MQTT_TOPIC_CTX = os.environ.get("BMO_MQTT_TOPIC_CTX", VISION_CONTEXT)
 MQTT_TOPIC_RESP = os.environ.get("BMO_MQTT_TOPIC_RESP", VISION_CMD_RESULT)
 
-PALM_MODEL_URL = (
-    "https://huggingface.co/opencv/palm_detection_mediapipe/resolve/main/palm_detection_mediapipe_2023feb.onnx"
-)
-PALM_MODEL_PATH = MODELS_DIR / "palm_detection.onnx"
-HANDPOSE_MODEL_URL = "https://huggingface.co/opencv/handpose_estimation_mediapipe/resolve/main/handpose_estimation_mediapipe_2023feb.onnx"
-HANDPOSE_MODEL_PATH = MODELS_DIR / "handpose_estimation.onnx"
-SIGN_MODEL_PATH = MODELS_DIR / "sign.pt"
 YOLO_MODEL_PATH = MODELS_DIR / "yolo26s.pt"
 YOLO_WORLD_MODEL_PATH = MODELS_DIR / "yolov8s-worldv2.pt"
 
@@ -127,12 +117,9 @@ def get_onnx_providers() -> list[str]:
         return _ONNX_PROVIDERS_CACHE
 
     try:
-        import onnxruntime
-
         _preload_cuda_dlls()
-        available = onnxruntime.get_available_providers()
-        # Force CPUExecutionProvider on Turing (GTX 1660 Ti, sm_75) - CUDA graph capture unsupported
-        _ONNX_PROVIDERS_CACHE = ["CPUExecutionProvider"]
-    except ImportError:
-        _ONNX_PROVIDERS_CACHE = ["CPUExecutionProvider"]
+    except Exception:
+        pass
+    # Force CPUExecutionProvider on Turing (GTX 1660 Ti, sm_75) - CUDA graph capture unsupported
+    _ONNX_PROVIDERS_CACHE = ["CPUExecutionProvider"]
     return _ONNX_PROVIDERS_CACHE

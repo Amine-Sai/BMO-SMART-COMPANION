@@ -9,8 +9,6 @@ This document specifies the required pretrained neural network weights and runti
 | **STT** | Faster-Whisper | `base.en` | CTranslate2 / int8 | CPU | ~140 MB | Hugging Face cache (`~/.cache/huggingface/hub`) |
 | **TTS** | Piper | `en_US-lessac-medium` | ONNX + JSON | CPU | ~63 MB | `models/piper/` |
 | **Wake** | openWakeWord | `hey_jarvis_v0.1` | ONNX | CPU | ~15 MB | `openwakeword/resources/models/` |
-| **Palm** | MediaPipe / CV | `palm_detection` | ONNX | CPU/GPU | ~3.9 MB | `assistant_cv/models/palm_detection.onnx` |
-| **Hand** | MediaPipe / CV | `handpose_estimation` | ONNX | CPU/GPU | ~4.1 MB | `assistant_cv/models/handpose_estimation.onnx` |
 
 ---
 
@@ -21,8 +19,6 @@ Pins were established via Trust On First Use (TOFU) verification against upstrea
 
 | Name | Target Path | SHA256 (Pinned 2026-11-10) | Upstream Source |
 |---|---|---|---|
-| `palm_detection` | `assistant_cv/models/palm_detection.onnx` | `78ff51c38496b7fc8b8ebdb6cc8c1abb02fa6c38427c6848254cdaba57fcce7c` | [OpenCV Zoo / Hugging Face](https://huggingface.co/opencv/palm_detection_mediapipe/resolve/main/palm_detection_mediapipe_2023feb.onnx) |
-| `handpose_estimation` | `assistant_cv/models/handpose_estimation.onnx` | `db0898ae717b76b075d9bf563af315b29562e11f8df5027a1ef07b02bef6d81c` | [OpenCV Zoo / Hugging Face](https://huggingface.co/opencv/handpose_estimation_mediapipe/resolve/main/handpose_estimation_mediapipe_2023feb.onnx) |
 | `piper_voice` | `models/piper/en_US-lessac-medium.onnx` | `5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f` | [rhasspy/piper-voices (v1.0.0)](https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/en_US-lessac-medium.onnx) |
 | `piper_config` | `models/piper/en_US-lessac-medium.onnx.json` | `efe19c417bed055f2d69908248c6ba650fa135bc868b0e6abb3da181dab690a0` | [rhasspy/piper-voices (v1.0.0)](https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json) |
 | `hey_jarvis_v0.1` | `<openwakeword>/resources/models/hey_jarvis_v0.1.onnx` | `94a13cfe60075b132f6a472e7e462e8123ee70861bc3fb58434a73712ee0d2cb` | [dscripka/openWakeWord (v0.5.1)](https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/hey_jarvis_v0.1.onnx) |
@@ -33,7 +29,7 @@ Pins were established via Trust On First Use (TOFU) verification against upstrea
 - **Hash verification**: Every downloaded file is hashed using Python's `hashlib.sha256`.
 - **Fail-fast and delete on mismatch**: If the SHA256 does not match the pinned hash, the file is unlinked immediately and a `ValueError` is raised. Partial or corrupt files are never retained.
 - **Timeout enforcement**: Remote asset downloads enforce socket timeouts (default 30 seconds) via `urllib.request`.
-- **Zero runtime downloads**: Computer vision modules (`assistant_cv/hands.py`) never perform downloads at runtime. Missing weights raise `FileNotFoundError` immediately, requiring prior execution of `tools/fetch_assets.py`.
+- **Zero runtime downloads**: All model assets are fetched ahead of time via `tools/fetch_assets.py`; runtime code never downloads weights.
 
 ---
 

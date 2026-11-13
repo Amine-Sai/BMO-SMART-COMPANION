@@ -191,7 +191,6 @@ class ShortTermMemory:
         self.registry = registry
         self.clock = clock
         self.events: deque[dict[str, Any]] = deque(maxlen=30)
-        self.recent_signs: deque[dict[str, Any]] = deque(maxlen=20)
         self.persons_history: dict[str, dict[str, Any]] = {}
         self.objects_history: dict[str, dict[str, Any]] = {}
         self.current_persons: list[dict[str, Any]] = []
@@ -206,17 +205,6 @@ class ShortTermMemory:
             "data": data or {},
         }
         self.events.append(item)
-
-    def record_sign(self, sign: str, conf: float, signer: str | None = None) -> None:
-        """Record a recognized sign language gesture."""
-        item = {
-            "sign": sign.upper(),
-            "conf": round(float(conf), 2),
-            "signer": signer,
-            "timestamp": self.clock(),
-        }
-        self.recent_signs.append(item)
-        self.record_event("sign_recognized", item)
 
     def update(
         self,
@@ -327,22 +315,7 @@ class ShortTermMemory:
         # 3. Active objects
         obj_summary = [f"{o['count']} {o['label']}" for o in self.current_objects]
 
-        # 4. Recent signs
-        signs_summary = []
-        cutoff = now - self.window_sec
-        for s in reversed(self.recent_signs):
-            if s["timestamp"] >= cutoff:
-                ago = round(now - s["timestamp"], 1)
-                signs_summary.append(
-                    {
-                        "sign": s["sign"],
-                        "conf": s["conf"],
-                        "signer": s["signer"],
-                        "ago_sec": ago,
-                    }
-                )
-
-        # 5. Natural language one-line summary
+        # 4. Natural language one-line summary
         summary_parts = []
         if known_in_view:
             summary_parts.append(f"Seeing {', '.join(known_in_view)}.")
@@ -352,15 +325,9 @@ class ShortTermMemory:
         if obj_summary:
             summary_parts.append(f"Visible objects: {', '.join(obj_summary)}.")
 
-        if signs_summary:
-            latest_s = signs_summary[0]
-            summary_parts.append(
-                f"Recent sign: {latest_s['sign']} ({latest_s['conf'] * 100:.0f}%, {latest_s['ago_sec']}s ago)."
-            )
-
         summary_text = " ".join(summary_parts)
 
-        # 6. Recent events
+        # 5. Recent events
         events_list = []
         for ev in list(self.events)[-10:]:
             ago = round(now - ev["timestamp"], 1)
@@ -406,7 +373,6 @@ class ShortTermMemory:
             "current_persons": active_p,
             "recent_persons": recently_left,
             "current_objects": self.current_objects,
-            "recent_signs": signs_summary[:5],
             "recent_events": events_list,
             "known_persons": known_persons_roster,
             "registered_objects": known_objects_roster,
@@ -453,17 +419,6 @@ class ShortTermMemory:
                 seen_labels.add(lbl)
                 objects.append(lbl)
 
-        last_sign: dict[str, Any] | None = None
-        if self.recent_signs:
-            latest = self.recent_signs[-1]
-            sign_ts = float(latest.get("timestamp", 0.0))
-            age = max(0.0, now - sign_ts)
-            if age <= self.window_sec:
-                last_sign = {
-                    "text": str(latest.get("sign", "")).lower(),
-                    "age_s": round(age, 1),
-                }
-
         recent: list[str] = []
         for ev in list(self.events)[-5:]:
             ev_name = ev.get("event", "event")
@@ -474,9 +429,6 @@ class ShortTermMemory:
                 recent.append(f"person left (track: {data.get('track_id', 'unknown')})")
             elif ev_name == "face_identified":
                 recent.append(f"face identified: {data.get('name', 'unknown')}")
-            elif ev_name == "sign_recognized":
-                sign_txt = data.get("text") or data.get("sign", "")
-                recent.append(f"sign: {sign_txt}")
             elif ev_name in ("object_seen", "object_detected"):
                 recent.append(f"object seen: {data.get('label', 'unknown')}")
             else:
@@ -486,6 +438,5 @@ class ShortTermMemory:
             "ts": round(now, 3),
             "people": people,
             "objects": objects,
-            "last_sign": last_sign,
             "recent": recent,
         }

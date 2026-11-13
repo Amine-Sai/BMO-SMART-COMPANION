@@ -14,7 +14,6 @@ from bmo_contracts.models import (
     HwEvent,
     PersonLeft,
     Scene,
-    SignRecognized,
     VisionStatus,
 )
 from brain.audio.io import MemorySink, MemorySource
@@ -23,7 +22,6 @@ from brain.audio.tts import TextToSpeech
 from brain.audio.vad import VoiceActivityDetector
 from brain.audio.wake import WakeWordDetector
 from brain.edge_monitor import EdgeMonitor
-from brain.inputs.sign import SignInputHandler
 from brain.llm import ChatChunk, FakeLLMBackend, LLMClient, ToolCall
 from brain.policy import ProactivePolicy
 from brain.prompt import PromptBuilder
@@ -124,15 +122,6 @@ class TestDeterministicReplaySuite(unittest.TestCase):
             clock=fake_clock,
         )
 
-        # Sign input handler
-        self.sign_turns: list[str] = []
-        self.sign_handler = SignInputHandler(
-            settings=settings.policy,
-            state_machine=self.state_machine,
-            on_turn=lambda text: self.sign_turns.append(text),
-            clock=fake_clock,
-        )
-
         # Edge monitor
         self.edge_monitor = EdgeMonitor(
             state_machine=self.state_machine,
@@ -154,7 +143,7 @@ class TestDeterministicReplaySuite(unittest.TestCase):
         with FIXTURE_PATH.open("r", encoding="utf-8") as f:
             lines = [json.loads(line) for line in f if line.strip()]
 
-        self.assertEqual(len(lines), 8)
+        self.assertEqual(len(lines), 7)
 
         # Step 1: vision_status
         step1 = lines[0]
@@ -206,18 +195,8 @@ class TestDeterministicReplaySuite(unittest.TestCase):
         self.assertEqual(reply4, expected_reply)
         self.assertEqual(self.state_machine.state, BrainState.IDLE)
 
-        # Step 5: vision_event -> sign_recognized
-        step5 = lines[4]
-        self.assertEqual(step5["type"], "vision_event")
-        evt5 = SignRecognized.model_validate(step5["payload"])
-        self.current_time = 1005.0
-        sign_text = self.sign_handler.handle_event(evt5)
-        self.assertIsNotNone(sign_text)
-        self.assertEqual(sign_text, "[Sign: hello]")
-        self.assertEqual(len(self.sign_turns), 1)
-
-        # Step 6: user_voice -> tool invocation (move_head)
-        step6 = lines[5]
+        # Step 5: user_voice -> tool invocation (move_head)
+        step6 = lines[4]
         self.assertEqual(step6["type"], "user_voice")
         tool_call_item = ChatChunk(
             text="Looking to the left.",
@@ -247,7 +226,7 @@ class TestDeterministicReplaySuite(unittest.TestCase):
         self.assertEqual(self.tool_calls_dispatched[0][1], {"pan": -30.0, "tilt": 0.0})
 
         # Step 7: vision_event -> person_left
-        step7 = lines[6]
+        step7 = lines[5]
         self.assertEqual(step7["type"], "vision_event")
         evt7 = PersonLeft.model_validate(step7["payload"])
         self.current_time = 1010.0
@@ -255,7 +234,7 @@ class TestDeterministicReplaySuite(unittest.TestCase):
         self.assertEqual(self.state_machine.state, BrainState.IDLE)
 
         # Step 8: hw_event -> mute switch
-        step8 = lines[7]
+        step8 = lines[6]
         self.assertEqual(step8["type"], "hw_event")
         hw_evt = HwEvent.model_validate(step8["payload"])
         self.edge_monitor.handle_hw_event(hw_evt)

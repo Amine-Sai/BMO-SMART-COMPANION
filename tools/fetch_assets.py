@@ -46,18 +46,6 @@ def get_openwakeword_dir() -> Path:
 
 
 ASSETS: dict[str, dict[str, Any]] = {
-    "palm_detection": {
-        "name": "palm_detection",
-        "url": "https://huggingface.co/opencv/palm_detection_mediapipe/resolve/main/palm_detection_mediapipe_2023feb.onnx",
-        "path": CV_MODELS_DIR / "palm_detection.onnx",
-        "sha256": "78ff51c38496b7fc8b8ebdb6cc8c1abb02fa6c38427c6848254cdaba57fcce7c",
-    },
-    "handpose_estimation": {
-        "name": "handpose_estimation",
-        "url": "https://huggingface.co/opencv/handpose_estimation_mediapipe/resolve/main/handpose_estimation_mediapipe_2023feb.onnx",
-        "path": CV_MODELS_DIR / "handpose_estimation.onnx",
-        "sha256": "db0898ae717b76b075d9bf563af315b29562e11f8df5027a1ef07b02bef6d81c",
-    },
     "piper_voice": {
         "name": "piper_voice",
         "url": "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/en_US-lessac-medium.onnx",
@@ -314,52 +302,6 @@ def fetch_piper_voice(
     }
 
 
-def fetch_hand_models(
-    target_dir: Path | None = None,
-    fetch_remote: bool = True,
-    download_fn: Callable[[str, Path], None] | None = None,
-) -> dict[str, object]:
-    """Verify or download MediaPipe palm detection and handpose estimation ONNX models."""
-    out_dir = target_dir or CV_MODELS_DIR
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    palm_asset = ASSETS["palm_detection"]
-    handpose_asset = ASSETS["handpose_estimation"]
-
-    palm_path = out_dir / "palm_detection.onnx"
-    handpose_path = out_dir / "handpose_estimation.onnx"
-
-    if fetch_remote:
-        for asset, path in [(palm_asset, palm_path), (handpose_asset, handpose_path)]:
-            if not verify_asset_file(path, asset["sha256"]):
-                try:
-                    download_and_verify(
-                        url=asset["url"],
-                        target_path=path,
-                        expected_sha256=asset["sha256"],
-                        timeout=30.0,
-                        download_fn=download_fn,
-                    )
-                except Exception as exc:
-                    return {
-                        "engine": "hands",
-                        "ok": False,
-                        "dir": str(out_dir),
-                        "error": str(exc),
-                    }
-
-    palm_ok = verify_asset_file(palm_path, palm_asset["sha256"])
-    handpose_ok = verify_asset_file(handpose_path, handpose_asset["sha256"])
-
-    return {
-        "engine": "hands",
-        "ok": palm_ok and handpose_ok,
-        "dir": str(out_dir),
-        "palm_path": str(palm_path) if palm_ok else None,
-        "handpose_path": str(handpose_path) if handpose_ok else None,
-    }
-
-
 def fetch_faster_whisper(
     model_size: str = "base.en",
     download_fn: Callable[[str], str] | None = None,
@@ -398,7 +340,6 @@ def fetch_all(check_only: bool = False) -> dict[str, object]:
         "faster_whisper": fetch_faster_whisper()
         if not check_only
         else {"engine": "faster_whisper", "check_only": True},
-        "hands": fetch_hand_models(fetch_remote=not check_only),
     }
     return results
 

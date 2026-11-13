@@ -4,11 +4,6 @@
 env/
 venv/
 
-# Progression & Local Notes
-PROGRESS.md
-AUDIT.md
-DEMO_COORD.md
-
 # Python cache & artifacts
 __pycache__/
 *.py[cod]
@@ -19,6 +14,8 @@ graphify-out/
 docs/
 # Model weights & downloads (auto-downloaded on first run)
 weights/
+models/*.gguf
+models/piper/en_US-*
 assistant_cv/models/*.pt
 assistant_cv/models/*.task
 assistant_cv/models/*.onnx

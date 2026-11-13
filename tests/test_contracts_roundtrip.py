@@ -25,7 +25,6 @@ from bmo_contracts.models import (
     HwCmd,
     HwEvent,
     HwStatus,
-    LastSign,
     ObjectData,
     ObjectSeen,
     PersonData,
@@ -34,8 +33,6 @@ from bmo_contracts.models import (
     PersonLeftData,
     Scene,
     ScenePerson,
-    SignData,
-    SignRecognized,
     VisionCmd,
     VisionCmdResult,
     VisionStatus,
@@ -157,11 +154,9 @@ def test_model_schema_presence() -> None:
         FaceData,
         PersonData,
         PersonLeftData,
-        SignData,
-        ObjectData,
+            ObjectData,
         ScenePerson,
-        LastSign,
-    ]
+        ]
     for model_cls in all_models:
         sample = make_sample(model_cls)
         assert sample is not None
@@ -183,8 +178,7 @@ def test_all_10_topics_roundtrip(peers: dict[str, Any]) -> None:
                 FaceIdentified,
                 PersonDetected,
                 PersonLeft,
-                SignRecognized,
-                ObjectSeen,
+                            ObjectSeen,
             ]
             for variant in variants:
                 inst = make_sample(variant)

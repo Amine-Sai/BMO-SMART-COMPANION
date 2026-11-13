@@ -14,8 +14,6 @@ from bmo_contracts.models import (
     FaceData,
     FaceIdentified,
     Scene,
-    SignData,
-    SignRecognized,
     VisionCmd,
     VisionCmdResult,
     VisionStatus,
@@ -72,8 +70,6 @@ def _sample_value(name: str, ann: Any) -> Any:
     if ann is str:
         if name == "state":
             return "idle"
-        if name == "sign":
-            return "wave"
         if name == "cmd":
             return "ping"
         if name == "id":
@@ -170,7 +166,7 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=1883, help="Broker port")
     parser.add_argument(
         "--scenario",
-        choices=["greeting", "sign", "cmd_echo"],
+        choices=["greeting", "cmd_echo"],
         default="greeting",
         help="Scenario to run",
     )
@@ -185,11 +181,6 @@ if __name__ == "__main__":
             if sample_face is None:
                 sample_face = FaceIdentified(data=FaceData(name="Finn"))
             mock.publish_event(sample_face)
-        elif args.scenario == "sign":
-            sample_sign = make_sample(SignRecognized)
-            if sample_sign is None:
-                sample_sign = SignRecognized(data=SignData(sign="wave"))
-            mock.publish_event(sample_sign)
         elif args.scenario == "cmd_echo":
             time.sleep(1.0)
     finally:

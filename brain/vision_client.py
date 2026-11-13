@@ -106,15 +106,12 @@ class VisionClient:
         self,
         *,
         face: bool | None = None,
-        sign: bool | None = None,
         objects: bool | None = None,
         timeout_s: float = 3.0,
     ) -> VisionCmdResult:
         args: dict[str, Any] = {}
         if face is not None:
             args["face"] = face
-        if sign is not None:
-            args["sign"] = sign
         if objects is not None:
             args["objects"] = objects
         return self.send_command("set_modules", args=args, timeout_s=timeout_s)

@@ -20,6 +20,16 @@ class Emotion(StrEnum):
     SLEEPY = "sleepy"
     WINK = "wink"
     ERROR = "error"
+    ANGRY = "angry"
+    MAD = "mad"
+    ANNOYED = "annoyed"
+    PLAYFUL = "playful"
+    LOVE = "love"
+    KISS = "kiss"
+    EXCITED = "excited"
+    AMAZED = "amazed"
+    TERRIFIED = "terrified"
+    EMPATHETIC = "empathetic"
 
 
 class VisionStatus(Model):
@@ -63,11 +73,6 @@ class PersonLeftData(Model):
     track_id: int | None = None
 
 
-class SignData(Model):
-    text: str
-    conf: float
-
-
 class ObjectData(Model):
     label: str
     conf: float
@@ -97,14 +102,6 @@ class PersonLeft(Model):
     data: PersonLeftData
 
 
-class SignRecognized(Model):
-    v: Literal[1] = 1
-    id: str
-    ts: float
-    type: Literal["sign_recognized"] = "sign_recognized"
-    data: SignData
-
-
 class ObjectSeen(Model):
     v: Literal[1] = 1
     id: str
@@ -114,7 +111,7 @@ class ObjectSeen(Model):
 
 
 Event = Annotated[
-    FaceIdentified | PersonDetected | PersonLeft | SignRecognized | ObjectSeen,
+    FaceIdentified | PersonDetected | PersonLeft | ObjectSeen,
     Field(discriminator="type"),
 ]
 EVENT_ADAPTER: TypeAdapter[Event] = TypeAdapter(Event)
@@ -136,17 +133,11 @@ class ScenePerson(Model):
     since_s: float
 
 
-class LastSign(Model):
-    text: str
-    age_s: float
-
-
 class Scene(Model):
     v: Literal[1] = 1
     ts: float
     people: list[ScenePerson]
     objects: list[str]
-    last_sign: LastSign | None = None
     recent: list[str]
 
 

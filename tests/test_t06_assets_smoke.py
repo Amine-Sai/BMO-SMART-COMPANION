@@ -17,7 +17,6 @@ from tools.fetch_assets import (
     download_and_verify,
     fetch_all,
     fetch_faster_whisper,
-    fetch_hand_models,
     fetch_openwakeword_models,
     fetch_piper_voice,
     verify_asset_file,
@@ -44,8 +43,6 @@ class TestAssetRoutines(unittest.TestCase):
         """Verify ASSETS table has required schema {name, url, path, sha256}."""
         self.assertIsInstance(ASSETS, dict)
         required_assets = [
-            "palm_detection",
-            "handpose_estimation",
             "piper_voice",
             "piper_config",
             "hey_jarvis_v0.1",
@@ -139,72 +136,6 @@ class TestAssetRoutines(unittest.TestCase):
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    def test_fetch_hand_models_local_detection(self) -> None:
-        """Verify fetch_hand_models detects and verifies local models."""
-        tmp_dir = Path("scratch/test_hand_models")
-        tmp_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            # Initially missing
-            res_missing = fetch_hand_models(target_dir=tmp_dir, fetch_remote=False)
-            self.assertEqual(res_missing["engine"], "hands")
-            self.assertFalse(res_missing["ok"])
-
-            # Create dummy files with mismatched content
-            palm_path = tmp_dir / "palm_detection.onnx"
-            handpose_path = tmp_dir / "handpose_estimation.onnx"
-            palm_path.write_bytes(b"bad_palm")
-            handpose_path.write_bytes(b"bad_handpose")
-
-            res_corrupt = fetch_hand_models(target_dir=tmp_dir, fetch_remote=False)
-            self.assertFalse(res_corrupt["ok"])
-
-            palm_sha = ASSETS["palm_detection"]["sha256"]
-            handpose_sha = ASSETS["handpose_estimation"]["sha256"]
-
-            def mock_dl(_url: str, path: Path) -> None:
-                path.write_bytes(b"downloaded")
-
-            with patch("tools.fetch_assets.compute_sha256") as mock_hash:
-                def fake_hash(p: Path | str) -> str:
-                    if "palm" in str(p):
-                        return palm_sha
-                    return handpose_sha
-
-                mock_hash.side_effect = fake_hash
-
-                res_fetched = fetch_hand_models(
-                    target_dir=tmp_dir,
-                    fetch_remote=True,
-                    download_fn=mock_dl,
-                )
-                self.assertTrue(res_fetched["ok"])
-        finally:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-
-    def test_hands_raises_error_if_model_missing_no_urlopen(self) -> None:
-        """Verify assistant_cv.hands raises FileNotFoundError if model missing and does not use urlopen."""
-        import assistant_cv.hands as hands_mod
-
-        # Verify hands module does not contain urlopen
-        self.assertNotIn("urlopen", hands_mod.__dict__)
-
-        # Reset singleton state
-        saved_palm = hands_mod._palm_detector
-        saved_handpose = hands_mod._handpose_detector
-        hands_mod._palm_detector = None
-        hands_mod._handpose_detector = None
-
-        try:
-            non_existent = Path("scratch/non_existent_model.onnx")
-            with patch("assistant_cv.hands.PALM_MODEL_PATH", non_existent):
-                with self.assertRaises(FileNotFoundError) as ctx:
-                    hands_mod.get_detectors()
-                self.assertIn("tools/fetch_assets.py", str(ctx.exception))
-                self.assertIn("Palm detection", str(ctx.exception))
-        finally:
-            hands_mod._palm_detector = saved_palm
-            hands_mod._handpose_detector = saved_handpose
-
     def test_fetch_openwakeword_models_logic(self) -> None:
         """Verify openWakeWord download logic and model discovery."""
         downloaded: list[str] = []
@@ -261,7 +192,6 @@ class TestAssetRoutines(unittest.TestCase):
         self.assertIn("openwakeword", results)
         self.assertIn("piper", results)
         self.assertIn("faster_whisper", results)
-        self.assertIn("hands", results)
 
     def test_openwakeword_smoke_scoring(self) -> None:
         """Smoke test openWakeWord scoring synthetic audio."""

@@ -57,32 +57,6 @@ def _format_object(obj: Any) -> str:
     return str(getattr(obj, "name", None) or getattr(obj, "label", None) or obj)
 
 
-def _format_sign(val: Any) -> str:
-    if not val:
-        return "none"
-    if isinstance(val, list):
-        if not val:
-            return "none"
-        val = val[0]
-    if isinstance(val, str):
-        return val
-    text = getattr(val, "text", None) or (val.get("text") if isinstance(val, dict) else None)
-    if not text:
-        text = str(val)
-    age = (
-        getattr(val, "age_s", None)
-        or getattr(val, "duration_s", None)
-        or getattr(val, "ago_s", None)
-        or getattr(val, "age", None)
-    )
-    if age is None and isinstance(val, dict):
-        age = val.get("age_s") or val.get("duration_s") or val.get("ago_s") or val.get("age")
-    if age is not None:
-        age_str = f"{int(age)}s ago" if isinstance(age, (int, float)) else str(age)
-        return f"{text}({age_str})"
-    return str(text)
-
-
 def _get_field(obj: Any, *names: str) -> Any:
     for name in names:
         if hasattr(obj, name):
@@ -191,9 +165,6 @@ class SceneCache:
         elif raw_objects:
             objects_list = [_format_object(raw_objects)]
 
-        raw_sign = _get_field(scene, "last_sign", "sign", "text_sign", "signs")
-        sign_str = _format_sign(raw_sign)
-
         raw_recent = _get_field(scene, "recent", "recent_events", "events")
         recent_list: list[str] = []
         if isinstance(raw_recent, list):
@@ -204,46 +175,39 @@ class SceneCache:
         # Only surface the fields the user actually asked about.
         if target in ("people", "person", "face"):
             objects_list = []
-            sign_str = "none"
             recent_list = []
         elif target in ("objects", "object", "thing", "item"):
             people_list = []
-            sign_str = "none"
             recent_list = []
 
-        def render(p_items: list[str], o_items: list[str], s_val: str, r_items: list[str]) -> str:
+        def render(p_items: list[str], o_items: list[str], r_items: list[str]) -> str:
             p_str = ", ".join(p_items) if p_items else "none"
             o_str = ",".join(o_items) if o_items else "none"
             r_str = ", ".join(r_items) if r_items else "none"
-            return f"Camera: online | people: {p_str} | objects: {o_str} | sign: {s_val} | recent: {r_str}"
+            return f"Camera: online | people: {p_str} | objects: {o_str} | recent: {r_str}"
 
-        line = render(people_list, objects_list, sign_str, recent_list)
+        line = render(people_list, objects_list, recent_list)
         if count_tokens(line) <= 60:
             return line
 
-        while recent_list and count_tokens(render(people_list, objects_list, sign_str, recent_list)) > 60:
+        while recent_list and count_tokens(render(people_list, objects_list, recent_list)) > 60:
             recent_list.pop()
 
-        line = render(people_list, objects_list, sign_str, recent_list)
+        line = render(people_list, objects_list, recent_list)
         if count_tokens(line) <= 60:
             return line
 
-        while objects_list and count_tokens(render(people_list, objects_list, sign_str, recent_list)) > 60:
+        while objects_list and count_tokens(render(people_list, objects_list, recent_list)) > 60:
             objects_list.pop()
 
-        line = render(people_list, objects_list, sign_str, recent_list)
+        line = render(people_list, objects_list, recent_list)
         if count_tokens(line) <= 60:
             return line
 
-        while people_list and count_tokens(render(people_list, objects_list, sign_str, recent_list)) > 60:
+        while people_list and count_tokens(render(people_list, objects_list, recent_list)) > 60:
             people_list.pop()
 
-        line = render(people_list, objects_list, sign_str, recent_list)
-        if count_tokens(line) <= 60:
-            return line
-
-        sign_str = "none"
-        line = render(people_list, objects_list, sign_str, recent_list)
+        line = render(people_list, objects_list, recent_list)
         if count_tokens(line) <= 60:
             return line
 

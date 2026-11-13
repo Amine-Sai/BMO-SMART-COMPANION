@@ -108,7 +108,7 @@ def test_t26_cv_conformance(broker: Any) -> None:
         # Publish scene contract
         bridge.publish_scene(mem.get_scene_contract())
 
-        # Publish 4 events
+        # Publish 3 events
         bridge.publish_event(
             "person_detected",
             {"track_id": 1, "pos": "center", "proximity": "near"},
@@ -116,10 +116,6 @@ def test_t26_cv_conformance(broker: Any) -> None:
         bridge.publish_event(
             "face_identified",
             {"track_id": 1, "name": "Jud", "conf": 0.95},
-        )
-        bridge.publish_event(
-            "sign_recognized",
-            {"sign": "wave", "conf": 0.9},
         )
         bridge.publish_event(
             "object_seen",
@@ -133,7 +129,7 @@ def test_t26_cv_conformance(broker: Any) -> None:
         while time.time() < deadline:
             if (
                 len(received[VISION_STATUS]) > 0
-                and len(received[VISION_EVENTS]) >= 4
+                and len(received[VISION_EVENTS]) >= 3
                 and len(received[VISION_CONTEXT]) > 0
                 and len(received[VISION_CMD_RESULT]) > 0
             ):
@@ -147,7 +143,7 @@ def test_t26_cv_conformance(broker: Any) -> None:
             assert isinstance(st, VisionStatus)
 
         # Assert VISION_EVENTS validates cleanly against EVENT_ADAPTER
-        assert len(received[VISION_EVENTS]) >= 4, f"Expected >= 4 events, got {len(received[VISION_EVENTS])}"
+        assert len(received[VISION_EVENTS]) >= 3, f"Expected >= 3 events, got {len(received[VISION_EVENTS])}"
         for payload in received[VISION_EVENTS]:
             evt = EVENT_ADAPTER.validate_json(payload)
             assert evt is not None

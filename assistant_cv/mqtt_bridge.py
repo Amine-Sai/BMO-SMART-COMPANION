@@ -42,24 +42,14 @@ from bmo_contracts.topics import (
     VISION_STATUS,
 )
 
-try:
-    from .config import (
-        MQTT_HOST,
-        MQTT_PORT,
-        MQTT_TOPIC_CMD,
-        MQTT_TOPIC_CTX,
-        MQTT_TOPIC_EVENT,
-        MQTT_TOPIC_RESP,
-    )
-except ImportError:
-    from config import (
-        MQTT_HOST,
-        MQTT_PORT,
-        MQTT_TOPIC_CMD,
-        MQTT_TOPIC_CTX,
-        MQTT_TOPIC_EVENT,
-        MQTT_TOPIC_RESP,
-    )
+from assistant_cv.config import (
+    MQTT_HOST,
+    MQTT_PORT,
+    MQTT_TOPIC_CMD,
+    MQTT_TOPIC_CTX,
+    MQTT_TOPIC_EVENT,
+    MQTT_TOPIC_RESP,
+)
 
 
 class MQTTBridge:
@@ -224,7 +214,6 @@ class MQTTBridge:
             "face_identified",
             "person_detected",
             "person_left",
-            "sign_recognized",
             "object_seen",
         }
 
@@ -259,12 +248,6 @@ class MQTTBridge:
             elif norm_type == "person_left":
                 norm_data = {
                     "track_id": data.get("track_id", data.get("id")),
-                }
-            elif norm_type == "sign_recognized":
-                sign_txt = str(data.get("text") or data.get("sign") or "").lower()
-                norm_data = {
-                    "text": sign_txt,
-                    "conf": float(data.get("conf", 1.0)),
                 }
             elif norm_type == "object_seen":
                 label_txt = str(data.get("label") or data.get("name") or "")

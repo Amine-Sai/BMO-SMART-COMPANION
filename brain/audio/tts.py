@@ -30,6 +30,10 @@ class TextToSpeech:
         self._clock = clock
         self._cancel_event = threading.Event()
         self._active_sink: AudioSink | None = None
+        # Loading the Piper model costs seconds; keep one loaded per voice.
+        self._voice: object | None = None
+        self._voice_path: Path | None = None
+        self._voice_lock = threading.Lock()
 
     def synthesize(self, text: str) -> np.ndarray:
         if not text.strip():
@@ -45,12 +49,17 @@ class TextToSpeech:
             try:
                 import piper.voice  # type: ignore[import-untyped]
 
-                voice = piper.voice.PiperVoice.load(str(resolved_path), use_cuda=False)
-                chunks = list(voice.synthesize(text))
+                with self._voice_lock:
+                    if self._voice is None or self._voice_path != resolved_path:
+                        self._voice = piper.voice.PiperVoice.load(
+                            str(resolved_path), use_cuda=False
+                        )
+                        self._voice_path = resolved_path
+                    chunks = list(self._voice.synthesize(text))  # type: ignore[union-attr]
                 audio = np.concatenate([c.audio_int16_array for c in chunks])
 
                 # Resample from model sample rate (usually 22050) to system SAMPLE_RATE (16000)
-                model_sr = voice.config.sample_rate
+                model_sr = self._voice.config.sample_rate  # type: ignore[union-attr]
                 if model_sr != SAMPLE_RATE:
                     # Simple linear interpolation resampling
                     duration = len(audio) / model_sr

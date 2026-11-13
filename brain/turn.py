@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import sys
 import threading
 import time
@@ -21,12 +22,51 @@ from brain.prompt import PromptBuilder
 from brain.state import BrainState, BrainStateMachine
 from brain.stream import SentenceSplitter
 from brain.tools.registry import ToolRegistry
-from brain.emotions import split_emotion_tag, strip_emotion_tag
+from brain.emotions import split_emotion_tag, strip_emotion_tags
 from brain.memory_extract import apply_memory_effects
 from brain.tools.registry import needs_tools
 from brain.vision_intent import vision_target
 
 logger = logging.getLogger(__name__)
+
+# A follow-up that points back at what BMO just looked at ("what colour is it?",
+# "how many fingers am I holding?") needs a fresh scene even though the text has
+# no explicit "camera" keyword. Deictic references are the cheap signal.
+_FOLLOWUP_REFERENCE_RE = re.compile(
+    r"\b(?:it|its|it's|they|them|their|theirs|those|these|that|this|there|"
+    r"he|she|him|her|his|hers|one|ones|same|other|both|else|"
+    r"color|colour|many|much|big|small|left|right|behind|front|"
+    r"holding|wearing|doing|happening)\b",
+    re.IGNORECASE,
+)
+_FOLLOWUP_VISION_WINDOW_S = 60.0
+
+
+def resolve_vision_target(
+    user_text: str,
+    *,
+    followup: bool,
+    last_target: str | None,
+    last_at: float,
+    now: float,
+) -> str | None:
+    """Return the camera target for this turn, reusing the last scene context.
+
+    A follow-up like "what colour is it?" has no camera keyword, but it still
+    refers to what BMO just looked at. If it arrives soon after a vision turn
+    and contains a deictic reference, re-request the same kind of look so the
+    prompt gets a fresh scene instead of the previous one.
+    """
+    kind = vision_target(user_text)
+    if (
+        kind is None
+        and followup
+        and last_target is not None
+        and now - last_at <= _FOLLOWUP_VISION_WINDOW_S
+        and _FOLLOWUP_REFERENCE_RE.search(user_text)
+    ):
+        return last_target
+    return kind
 
 
 class TurnManager:
@@ -61,11 +101,17 @@ class TurnManager:
         self._on_turn_metrics = on_turn_metrics
         self._vision_request_fn = vision_request_fn
         self._clock = clock
+        self._last_vision_target: str | None = None
+        self._last_vision_at = 0.0
         self.cancel_event = threading.Event()
         self._active_thread: threading.Thread | None = None
         # Single-flight gate: held for the whole turn body, so at most one
         # LLM decode/TTS turn runs at a time. Contenders are dropped, not queued.
         self._turn_gate = threading.Lock()
+        # Playback runs off the generation thread so the next sentence can be
+        # synthesized while the previous one is still playing.
+        self._play_lock = threading.Lock()
+        self._play_threads: list[threading.Thread] = []
 
     def process_audio_frame(self, frame: np.ndarray, source: AudioSource | None = None) -> str | None:
         if self._state_machine.state == BrainState.SPEAKING:
@@ -166,6 +212,27 @@ class TurnManager:
     def _end_turn(self) -> None:
         self._turn_gate.release()
 
+    def _queue_playback(self) -> None:
+        """Drain the sink on a worker thread, serialized so audio never overlaps."""
+        if not hasattr(self._sink, "drain"):
+            return
+
+        def _play() -> None:
+            with self._play_lock:
+                try:
+                    self._sink.drain()
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("Sink drain failed: %s", exc)
+
+        thread = threading.Thread(target=_play, name="tts-playback", daemon=True)
+        self._play_threads.append(thread)
+        thread.start()
+
+    def _wait_playback(self) -> None:
+        for thread in list(self._play_threads):
+            thread.join(timeout=30.0)
+        self._play_threads.clear()
+
     def _text_turn_worker(self, text: str) -> None:
         try:
             self._run_turn(text)
@@ -201,6 +268,7 @@ class TurnManager:
         confirmed: bool = False,
         vad_end_ts: float | None = None,
         stt_ms: float = 0.0,
+        followup: bool = False,
     ) -> str:
         if not self._begin_turn():
             return ""
@@ -210,6 +278,7 @@ class TurnManager:
                 confirmed=confirmed,
                 vad_end_ts=vad_end_ts,
                 stt_ms=stt_ms,
+                followup=followup,
             )
         finally:
             self._end_turn()
@@ -221,6 +290,7 @@ class TurnManager:
         confirmed: bool = False,
         vad_end_ts: float | None = None,
         stt_ms: float = 0.0,
+        followup: bool = False,
     ) -> str:
         memory = getattr(self._prompt_builder, "memory", None)
         if memory is not None:
@@ -230,7 +300,21 @@ class TurnManager:
             except Exception as exc:
                 logger.warning("memory update failed: %s", exc)
 
-        vision_target_kind = vision_target(user_text)
+        vision_target_kind = resolve_vision_target(
+            user_text,
+            followup=followup,
+            last_target=self._last_vision_target,
+            last_at=self._last_vision_at,
+            now=self._clock(),
+        )
+        if followup and vision_target_kind and vision_target(user_text) is None:
+            logger.info(
+                "Follow-up references the last scene; looking again (%s)",
+                vision_target_kind,
+            )
+        if vision_target_kind:
+            self._last_vision_target = vision_target_kind
+            self._last_vision_at = self._clock()
         if self._vision_request_fn is not None and vision_target_kind:
             try:
                 logger.info("Vision intent (%s); requesting fresh camera look", vision_target_kind)
@@ -308,12 +392,9 @@ class TurnManager:
                     logger.error("TTS speak_sentence failed: %s", exc)
                     return
 
-            # Wait for audio to finish playing
-            if hasattr(self._sink, 'drain'):
-                try:
-                    self._sink.drain()
-                except Exception as exc:
-                    logger.error("Sink drain failed: %s", exc)
+            # Play asynchronously so the next sentence can be produced while
+            # this one is still audible.
+            self._queue_playback()
 
         # The single-flight gate guarantees only one llama-cpp decode at a time.
         t_chat0 = self._clock()
@@ -359,8 +440,11 @@ class TurnManager:
                     if self.cancel_event.is_set():
                         break
 
-        full_reply = strip_emotion_tag("".join(reply_chunks))
+        full_reply = strip_emotion_tags("".join(reply_chunks))
         self._prompt_builder.record_turn(user_text, full_reply)
+
+        # Keep the face in SPEAKING until the queued audio has actually played.
+        self._wait_playback()
 
         if not self.cancel_event.is_set() and self._state_machine.state in (
             BrainState.SPEAKING,

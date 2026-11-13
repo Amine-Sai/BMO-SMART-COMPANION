@@ -4,7 +4,7 @@ import asyncio
 import socket
 import threading
 import time
-from bmo_contracts.models import LastSign, Scene, ScenePerson, VisionStatus
+from bmo_contracts.models import Scene, ScenePerson, VisionStatus
 from bmo_contracts.topics import VISION_CONTEXT, VISION_STATUS
 from brain.llm import count_tokens
 from brain.scene import SceneCache
@@ -56,7 +56,6 @@ def test_mock_cv_broker_integration() -> None:
             )
         ],
         objects=["cup", "book"],
-        last_sign=LastSign(text="HELLO", age_s=2.0),
         recent=["Jud arrived"],
     )
     mock_cv.client.publish(VISION_CONTEXT, sample_scene.model_dump_json(), retain=True)
@@ -83,7 +82,7 @@ def test_mock_cv_broker_integration() -> None:
         assert prompt_line.startswith("Camera: online")
         assert (
             prompt_line
-            == "Camera: online | people: Jud(center,near,12s) | objects: cup,book | sign: HELLO(2s ago) | recent: Jud arrived"
+            == "Camera: online | people: Jud(center,near,12s) | objects: cup,book | recent: Jud arrived"
         )
         assert count_tokens(prompt_line) <= 60
     finally:
@@ -102,7 +101,6 @@ def test_scene_cache_staleness() -> None:
         ts=fake_time,
         people=[],
         objects=[],
-        last_sign=None,
         recent=[],
     )
     cache.update_scene(sample_scene)
@@ -125,7 +123,6 @@ def test_scene_cache_offline_status() -> None:
         ts=time.monotonic(),
         people=[],
         objects=[],
-        last_sign=None,
         recent=[],
     )
     cache.update_scene(sample_scene)
@@ -158,7 +155,6 @@ def test_scene_cache_concurrency() -> None:
                         ts=time.monotonic(),
                         people=[ScenePerson(name=f"User_{tid}_{i}", pos="center", proximity="near", since_s=1.0)],
                         objects=[f"obj_{i}"],
-                        last_sign=LastSign(text="TEST", age_s=0.5),
                         recent=[f"event_{i}"],
                     )
                     cache.update_scene(scene)

@@ -70,7 +70,7 @@ def test_tick_unloads_vram_when_idle_timeout_reached() -> None:
 
     assert unloaded is True
     assert manager.sleeping is True
-    vision_client.set_modules.assert_called_once_with(face=False, sign=False)
+    vision_client.set_modules.assert_called_once_with(face=False)
     llm_client.unload.assert_called_once()
 
     # Subsequent tick while already sleeping does not re-unload
@@ -99,7 +99,7 @@ def test_person_detected_wakes_manager_and_prewarms() -> None:
 
     assert woken is True
     assert manager.sleeping is False
-    vision_client.set_modules.assert_called_with(face=True, sign=True)
+    vision_client.set_modules.assert_called_with(face=True)
     llm_client.prewarm.assert_called_once()
 
 
@@ -159,7 +159,7 @@ def test_notify_activity_wakes_sleeping_manager() -> None:
     woken = manager.notify_activity()
     assert woken is True
     assert manager.sleeping is False
-    vision_client.set_modules.assert_called_with(face=True, sign=True)
+    vision_client.set_modules.assert_called_with(face=True)
     llm_client.prewarm.assert_called_once()
 
     # Notifying when already awake returns False
@@ -203,5 +203,5 @@ def test_tick_when_scene_is_none() -> None:
     clock.advance(301.0)
     assert manager.tick() is True
     assert manager.sleeping is True
-    vision_client.set_modules.assert_called_once_with(face=False, sign=False)
+    vision_client.set_modules.assert_called_once_with(face=False)
     llm_client.unload.assert_called_once()

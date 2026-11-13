@@ -147,7 +147,6 @@ def test_t26_integration_checkpoint_a(broker: Any) -> None:
                 )
             ],
             objects=["keys", "cup"],
-            last_sign=None,
             recent=["Jud arrived"],
         )
 

@@ -96,7 +96,7 @@ class TestMQTTCommandDispatcher(unittest.TestCase):
 
     def test_status_command(self):
         fps = 42.5
-        toggles = {"1:OBJ": True, "2:FACE": True, "3:SIGN": True, "L:LAZY": True, "T:TRK": True}
+        toggles = {"1:OBJ": True, "2:FACE": True, "L:LAZY": True, "T:TRK": True}
         status_data = {
             "fps": round(fps, 1),
             "lazy_mode": toggles["L:LAZY"],

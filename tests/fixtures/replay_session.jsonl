@@ -2,7 +2,6 @@
 {"type": "scene_context", "payload": {"ts": 1000.0, "people": [{"track_id": 1, "name": "Alice", "pos": "center", "proximity": "near", "since_s": 5.0}], "objects": ["laptop"], "recent": ["Alice arrived"]}}
 {"type": "vision_event", "payload": {"v": 1, "id": "evt-01", "ts": 1000.1, "type": "face_identified", "data": {"track_id": 1, "name": "Alice", "conf": 0.95}}}
 {"type": "user_voice", "payload": {"text": "Who is here?", "expected_reply": "Alice is here with her laptop."}}
-{"type": "vision_event", "payload": {"v": 1, "id": "evt-02", "ts": 1005.0, "type": "sign_recognized", "data": {"text": "hello", "conf": 0.92}}}
 {"type": "user_voice", "payload": {"text": "Look left please", "expected_tool": "move_head", "expected_args": {"pan": -30.0, "tilt": 0.0}}}
 {"type": "vision_event", "payload": {"v": 1, "id": "evt-03", "ts": 1010.0, "type": "person_left", "data": {"track_id": 1}}}
 {"type": "hw_event", "payload": {"ts": 1015.0, "kind": "mute_switch", "value": true}}

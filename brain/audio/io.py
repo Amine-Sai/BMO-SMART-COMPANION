@@ -8,6 +8,8 @@ import threading
 import time
 from typing import Callable, Protocol, runtime_checkable
 
+SpeechCallback = Callable[[list[float], float, float], None]
+
 import numpy as np
 import sounddevice as sd
 
@@ -259,9 +261,15 @@ class SoundDeviceSink:
     as a fallback when ``aplay`` is unavailable.
     """
 
-    def __init__(self, sample_rate: int = SAMPLE_RATE, device: int | str | None = None) -> None:
+    def __init__(
+        self,
+        sample_rate: int = SAMPLE_RATE,
+        device: int | str | None = None,
+        speech_cb: SpeechCallback | None = None,
+    ) -> None:
         self.sample_rate = sample_rate
         self.device = device
+        self._speech_cb = speech_cb
         self._buffer: list[np.ndarray] = []
         self._proc: subprocess.Popen | None = None
         self._lock = threading.Lock()
@@ -301,13 +309,40 @@ class SoundDeviceSink:
             with self._lock:
                 self._proc = None
 
+    def _emit_speech_envelope(self, audio: np.ndarray, rate: float = 30.0) -> None:
+        """Report an RMS envelope for lip sync just before playback starts."""
+        if self._speech_cb is None or len(audio) == 0:
+            return
+        step = max(1, int(self.sample_rate / rate))
+        samples = audio.astype(np.float32)
+        envelope: list[float] = []
+        for start in range(0, len(samples), step):
+            chunk = samples[start : start + step]
+            envelope.append(
+                float(np.sqrt(np.mean(chunk * chunk))) if len(chunk) else 0.0
+            )
+        reference = float(np.percentile(envelope, 90)) if envelope else 0.0
+        if reference <= 1.0:
+            envelope = [0.0 for _ in envelope]
+        else:
+            envelope = [
+                min(1.0, max(0.0, value / reference) ** 0.7) for value in envelope
+            ]
+        try:
+            self._speech_cb(envelope, time.monotonic() + 0.06, rate)
+        except Exception:
+            pass
+
     def drain(self, timeout_s: float = 30.0) -> None:
         """Play all buffered audio and wait for completion."""
+        del timeout_s
         with self._lock:
             if not self._buffer:
                 return
             audio = np.concatenate(self._buffer)
             self._buffer.clear()
+
+        self._emit_speech_envelope(audio)
 
         if shutil.which("aplay"):
             try:

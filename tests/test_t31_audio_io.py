@@ -184,6 +184,29 @@ def test_sounddevice_sink_protocol() -> None:
     sink.close()
 
 
+def test_speech_envelope_callback() -> None:
+    calls = []
+    sink = SoundDeviceSink(
+        speech_cb=lambda env, t0, rate: calls.append((env, t0, rate))
+    )
+    audio = np.full(8000, 3000, dtype=np.int16)
+    sink._emit_speech_envelope(audio)
+    assert len(calls) == 1
+    envelope, t0, rate = calls[0]
+    assert rate == 30.0
+    assert t0 > 0
+    assert len(envelope) > 1
+    assert max(envelope) == 1.0
+    assert min(envelope) == 1.0
+
+
+def test_silent_speech_envelope_is_zero() -> None:
+    calls = []
+    sink = SoundDeviceSink(speech_cb=lambda env, _t0, _rate: calls.append(env))
+    sink._emit_speech_envelope(np.zeros(8000, dtype=np.int16))
+    assert calls and set(calls[0]) == {0.0}
+
+
 @pytest.mark.audio_hw
 def test_sounddevice_record_1s() -> None:
     try:

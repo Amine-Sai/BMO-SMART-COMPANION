@@ -9,7 +9,9 @@ import time
 
 from bmo_contracts.models import VisionCmd, VisionCmdResult
 from bmo_contracts.topics import TOPICS, VISION_CMD_RESULT
+from brain.turn import resolve_vision_target
 from brain.vision_client import VisionClient
+from brain.vision_intent import vision_target
 import paho.mqtt.client as mqtt
 import pytest
 from tools.mock_cv import MockCV
@@ -20,6 +22,34 @@ def _find_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return int(s.getsockname()[1])
+
+
+def test_vision_target_identify_phrases():
+    assert vision_target("identify someone") == "people"
+    assert vision_target("identify this person") == "people"
+    assert vision_target("identify something") == "objects"
+    assert vision_target("identify this object") == "objects"
+    assert vision_target("identify this") == "both"
+    assert vision_target("what is the weather") is None
+
+
+def test_followup_reuses_last_vision_target():
+    common = {"last_target": "objects", "last_at": 0.0, "now": 5.0}
+    assert resolve_vision_target("is it red?", followup=True, **common) == "objects"
+    assert resolve_vision_target("tell me a joke", followup=True, **common) is None
+    assert resolve_vision_target("is it red?", followup=False, **common) is None
+    assert (
+        resolve_vision_target(
+            "is it red?", followup=True, last_target="objects", last_at=0.0, now=100.0
+        )
+        is None
+    )
+    assert (
+        resolve_vision_target(
+            "who is that", followup=True, last_target="objects", last_at=0.0, now=5.0
+        )
+        == "people"
+    )
 
 
 @pytest.fixture
@@ -109,7 +139,7 @@ def test_vision_client_against_mock_cv(broker, mock_cv_instance, mqtt_client):
     res_reload = vision.reload_gallery(timeout_s=5.0)
     assert res_reload.ok is True
 
-    res_modules = vision.set_modules(face=True, sign=False, objects=True, timeout_s=5.0)
+    res_modules = vision.set_modules(face=True, objects=True, timeout_s=5.0)
     assert res_modules.ok is True
 
 

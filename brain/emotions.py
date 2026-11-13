@@ -26,6 +26,14 @@ def strip_emotion_tag(text: str) -> str:
     return split_emotion_tag(text)[1]
 
 
+_ANY_TAG_RE = re.compile(r"\[[a-zA-Z_]+\]\s*")
+
+
+def strip_emotion_tags(text: str) -> str:
+    """Remove every ``[emotion]`` tag (the model emits one per sentence)."""
+    return _ANY_TAG_RE.sub("", text)
+
+
 class EmotionTagStreamFilter:
     """Strip ``[emotion]`` tags from a streamed reply, holding partial tags."""
 

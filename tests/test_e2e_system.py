@@ -16,8 +16,6 @@ import pytest
 from bmo_contracts.models import (
     Scene,
     ScenePerson,
-    SignData,
-    SignRecognized,
 )
 from brain.audio.io import AudioSource, MemorySink, MemorySource
 from brain.audio.stt import SpeechToText
@@ -204,26 +202,6 @@ def test_e2e_spoken_query_pipeline(
     assert "adventure" in pi.say_messages[-1].text
     assert len(sink.get_samples()) > 0
     assert brain.state == BrainState.IDLE
-
-
-def test_e2e_signed_phrase(
-    peers_and_brain: tuple[BrainService, MockCV, MockPi, E2EBackend, MemorySink],
-) -> None:
-    brain, cv, pi, backend, _ = peers_and_brain
-    backend.reply_text = "I see your sign!"
-    initial_say_count = len(pi.say_messages)
-
-    # Mock CV publishes sign recognized event
-    event = SignRecognized(
-        id="sign-evt-101",
-        ts=time.monotonic(),
-        data=SignData(text="HELP", conf=0.9),
-    )
-    cv.publish_event(event)
-
-    assert wait_for(lambda: len(pi.say_messages) > initial_say_count)
-    assert "sign" in pi.say_messages[-1].text
-    assert wait_for(lambda: brain.state == BrainState.IDLE)
 
 
 def test_e2e_enrollment_hands_free(

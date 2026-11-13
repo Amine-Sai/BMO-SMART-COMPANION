@@ -159,7 +159,7 @@ Queries current pipeline health, frame rate, lazy mode state, and toggle statuse
     "data": {
       "fps": 43.2,
       "lazy_mode": true,
-      "toggles": { "1:OBJ": true, "2:FACE": true, "3:SIGN": true, "L:LAZY": true, "T:TRK": true },
+      "toggles": { "1:OBJ": true, "2:FACE": true, "L:LAZY": true, "T:TRK": true },
       "persons_in_view": 1
     }
   }
@@ -196,7 +196,6 @@ Queries an immediate snapshot of short-term visual memory and natural-language s
           { "label": "lighter", "count": 1 }
         ],
         "recent_persons": [],
-        "recent_signs": [],
         "known_persons": ["User"],
         "registered_objects": ["lighter"]
       }
@@ -207,7 +206,7 @@ Queries an immediate snapshot of short-term visual memory and natural-language s
 ---
 
 #### 3. `set_mode`
-Switches pipeline execution state between `lazy` (models sleep when no person is present), `active` (all models run continuously), or `idle` (face and sign workers forced to sleep).
+Switches pipeline execution state between `lazy` (models sleep when no person is present), `active` (all models run continuously), or `idle` (face worker forced to sleep).
 - **Python CLI**:
   ```bash
   python tools/mqtt_client.py --cmd set_mode --mode lazy
@@ -386,7 +385,6 @@ The vision pipeline emits events instantly when transitions occur:
 | **`person_detected`** | A new person enters the frame | `{"count": 1, "diff": 1}` |
 | **`person_left`** | A person leaves the frame | `{"count": 0, "diff": 1}` |
 | **`face_identified`** | A known identity is recognized | `{"name": "User"}` |
-| **`sign_recognized`** | Sign language gesture confidence >= 0.90 | `{"sign": "hello", "conf": 0.94}` |
 | **`person_enrolled`** | Multi-shot face enrollment completed | `{"name": "Alice"}` |
 
 ---

@@ -11,7 +11,7 @@ def _make_person(name: str, pos: str = "center", proximity: str = "near") -> Sce
 
 
 def _make_scene(people: list[ScenePerson], ts: float = 100.0) -> Scene:
-    return Scene(ts=ts, people=people, objects=[], last_sign=None, recent=[])
+    return Scene(ts=ts, people=people, objects=[], recent=[])
 
 
 def test_case_1_zero_people_or_none_or_stale_or_offline() -> None:

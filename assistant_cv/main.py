@@ -4,10 +4,9 @@ Integrates:
   1. Object & Person Detection / Tracking (YOLO26s, CUDA FP16, ~30 Hz)
   2. Synchronized Face Recognition (InsightFace SCRFD + ArcFace, CUDA, Event-Driven Lazy Mode)
   3. Hands-Free Voice Auto-Enrollment (Programmatic multi-shot collector)
-  4. Real-Time Sign Language Recognition (OpenCV Zoo HandPose + SignNet GRU, Async Worker)
-  5. Short-Term Visual Memory (Rolling window context for TTS / LLM integration)
-  6. Real-Time MQTT JSON Bridge (Sub-millisecond TCP_NODELAY command & event streaming)
-  7. Sleek BMO HUD with interactive controls and status overlays.
+  4. Short-Term Visual Memory (Rolling window context for TTS / LLM integration)
+  5. Real-Time MQTT JSON Bridge (Sub-millisecond TCP_NODELAY command & event streaming)
+  6. Sleek BMO HUD with interactive controls and status overlays.
 """
 
 from __future__ import annotations
@@ -44,13 +43,9 @@ try:
         MQTT_HOST,
         MQTT_PORT,
         OBJ_FRAME_STRIDE,
-        SEQ_LEN,
-        SIGN_CONF,
     )
     from .enroll import AutoEnrollSession, AutoObjectEnrollSession
     from .faces import FaceIdentifier
-    from .hands import has_palms
-    from .live_sign import get_recognizer
     from .memory import PersonFaceSynchronizer, ShortTermMemory, get_proximity, get_screen_position
     from .mqtt_bridge import MQTTBridge
     from .objects import get_detector
@@ -70,21 +65,13 @@ except ImportError:
         MQTT_HOST,
         MQTT_PORT,
         OBJ_FRAME_STRIDE,
-        SEQ_LEN,
-        SIGN_CONF,
     )
     from enroll import AutoEnrollSession, AutoObjectEnrollSession
     from faces import FaceIdentifier
-    from hands import has_palms
-    from live_sign import get_recognizer
     from memory import PersonFaceSynchronizer, ShortTermMemory, get_proximity, get_screen_position
     from mqtt_bridge import MQTTBridge
     from objects import get_detector
 
-
-# Hands/sign recognition is intentionally disabled for now: BMO only cares
-# about people and objects. Flip to True to bring the sign modules back.
-SIGN_ENABLED = False
 
 
 # ---------------------------------------------------------------------------
@@ -270,138 +257,6 @@ class AsyncFaceWorker:
 
 
 # ---------------------------------------------------------------------------
-# Asynchronous Sign Language Worker (Lazy Event-Driven)
-# ---------------------------------------------------------------------------
-class AsyncSignWorker:
-    """Async Sign Language worker running lazy palm probing and 30 Hz recognition."""
-
-    MODE_SLEEP = "SLEEP"
-    MODE_PROBE = "PROBE"
-    MODE_ACTIVE = "ACTIVE"
-
-    def __init__(self) -> None:
-        self.recognizer = get_recognizer()
-        self.lock = threading.Lock()
-        self.wake_event = threading.Event()
-        self.running = False
-        self.latest_frame: np.ndarray | None = None
-        self.mode = self.MODE_SLEEP
-        self.force_active = False
-
-        self.active_sign: str | None = None
-        self.active_conf: float = 0.0
-        self.buf_len: int = 0
-        self.raw_hands: np.ndarray | None = None
-        self.last_latency_ms: float = 0.0
-        self.last_hand_seen_time: float = 0.0
-        self.last_probe_time: float = 0.0
-
-        self.thread: threading.Thread | None = None
-
-    def start(self) -> None:
-        self.running = True
-        self.thread = threading.Thread(target=self._worker_loop, daemon=True)
-        self.thread.start()
-
-    def submit_frame(self, frame: np.ndarray, person_present: bool = False, force: bool = False) -> None:
-        """Submit frame and update target activity mode."""
-        with self.lock:
-            self.latest_frame = frame
-            self.force_active = force
-            if force:
-                self.mode = self.MODE_ACTIVE
-            elif person_present:
-                if self.mode == self.MODE_SLEEP:
-                    self.mode = self.MODE_PROBE
-            else:
-                if self.mode == self.MODE_PROBE:
-                    self.mode = self.MODE_SLEEP
-
-        self.wake_event.set()
-
-    def get_results(self) -> tuple[str | None, float, int, np.ndarray | None, float, str]:
-        """Return (sign, conf, buf_len, raw_hands, latency_ms, mode)."""
-        with self.lock:
-            return (
-                self.active_sign,
-                self.active_conf,
-                self.buf_len,
-                self.raw_hands,
-                self.last_latency_ms,
-                self.mode,
-            )
-
-    def _worker_loop(self) -> None:
-        while self.running:
-            self.wake_event.wait(timeout=0.3)
-            if not self.running:
-                break
-
-            frame_to_process = None
-            cur_mode = self.MODE_SLEEP
-            with self.lock:
-                if self.latest_frame is not None:
-                    frame_to_process = self.latest_frame
-                    self.latest_frame = None
-                cur_mode = self.mode
-
-            if cur_mode == self.MODE_SLEEP or frame_to_process is None:
-                self.wake_event.clear()
-                continue
-
-            t0 = time.perf_counter()
-            now = time.time()
-
-            try:
-                if cur_mode == self.MODE_PROBE:
-                    # Probe for candidate palms at ~4 Hz
-                    if now - self.last_probe_time >= 0.22:
-                        self.last_probe_time = now
-                        if has_palms(frame_to_process):
-                            with self.lock:
-                                self.mode = self.MODE_ACTIVE
-                                self.last_hand_seen_time = now
-                    with self.lock:
-                        self.active_sign = None
-                        self.active_conf = 0.0
-                        self.buf_len = 0
-                        self.raw_hands = None
-                        self.last_latency_ms = (time.perf_counter() - t0) * 1000.0
-
-                elif cur_mode == self.MODE_ACTIVE:
-                    # Full 30 Hz sign language recognition step
-                    sign, conf, blen, hands = self.recognizer.step(frame_to_process)
-                    lat = (time.perf_counter() - t0) * 1000.0
-
-                    hand_detected = bool(hands is not None and np.any(hands))
-                    if hand_detected:
-                        self.last_hand_seen_time = now
-
-                    # If no hands detected for 1.5s and not forced, fall back to PROBE
-                    new_mode = self.MODE_ACTIVE
-                    if not self.force_active and (now - self.last_hand_seen_time > 1.5):
-                        new_mode = self.MODE_PROBE
-                        self.recognizer.reset()
-
-                    with self.lock:
-                        self.active_sign = sign
-                        self.active_conf = conf
-                        self.buf_len = blen
-                        self.raw_hands = hands
-                        self.last_latency_ms = lat
-                        self.mode = new_mode
-
-            except Exception as exc:
-                print(f"[SignWorker] Inference error: {exc}", file=sys.stderr)
-
-    def stop(self) -> None:
-        self.running = False
-        self.wake_event.set()
-        if self.thread and self.thread.is_alive():
-            self.thread.join(timeout=0.5)
-
-
-# ---------------------------------------------------------------------------
 # Edge-Triggered Event Detector with Bridge Forwarding & Debouncing
 # ---------------------------------------------------------------------------
 class EventDetector:
@@ -415,7 +270,6 @@ class EventDetector:
         self.prev_person_tracks: dict[int, dict[str, Any]] = {}
 
         self.prev_known_faces: set[str] = set()
-        self.prev_sign: str | None = None
 
         self.prev_object_counts: dict[str, int] = {}
         self.pending_object_counts: dict[str, int] = {}
@@ -427,8 +281,6 @@ class EventDetector:
         self,
         objects: list[dict[str, Any]],
         faces: list[tuple[str, float, tuple[int, int, int, int]]],
-        sign: str | None,
-        sign_conf: float,
     ) -> list[str]:
         new_events: list[str] = []
         now_str = time.strftime("%H:%M:%S")
@@ -513,14 +365,7 @@ class EventDetector:
             self._emit("face_identified", {"track_id": tid, "name": name, "conf": round(face_conf, 2)})
         self.prev_known_faces = curr_known
 
-        # 3. Sign recognition event
-        if sign and sign != self.prev_sign and sign.lower() != "none":
-            ev = f"[{now_str}] Sign: {sign.upper()} ({sign_conf * 100:.0f}%)"
-            new_events.append(ev)
-            self._emit("sign_recognized", {"text": sign.lower(), "sign": sign, "conf": round(sign_conf, 2)})
-        self.prev_sign = sign
-
-        # 4. Non-person object detection events with 2-frame debounce
+        # 3. Non-person object detection events with 2-frame debounce
         curr_obj_counts: dict[str, int] = {}
         curr_obj_confs: dict[str, float] = {}
         for o in objects:
@@ -595,22 +440,14 @@ def run_pipeline(
         mqtt_bridge.start()
 
     # Initialize Core Components
-    print("[1/4] Loading YOLO26s Object & Person Detector...")
+    print("[1/3] Loading YOLO26s Object & Person Detector...")
     obj_detector = get_detector()
 
-    print("[2/4] Initializing Event-Driven Async Face Worker (SCRFD + ArcFace)...")
+    print("[2/3] Initializing Event-Driven Async Face Worker (SCRFD + ArcFace)...")
     face_worker = AsyncFaceWorker()
     face_worker.start()
 
-    if SIGN_ENABLED:
-        print("[3/4] Initializing Event-Driven Async Sign Worker...")
-        sign_worker = AsyncSignWorker()
-        sign_worker.start()
-    else:
-        print("[3/4] Sign worker disabled (people/objects only)")
-        sign_worker = None
-
-    print("[4/4] Initializing Person-Face Synchronizer & Short-Term Memory...")
+    print("[3/3] Initializing Person-Face Synchronizer & Short-Term Memory...")
     synchronizer = PersonFaceSynchronizer(registry=face_worker.identifier.registry)
     short_term_memory = ShortTermMemory(window_sec=MEMORY_WINDOW_SEC, registry=face_worker.identifier.registry)
     event_detector = EventDetector(mqtt_bridge=mqtt_bridge)
@@ -624,7 +461,6 @@ def run_pipeline(
     toggles = {
         "1:OBJ": True,
         "2:FACE": True,
-        "3:SIGN": False,
         "L:LAZY": lazy,
         "T:TRK": True,  # Keep tracking enabled for person track IDs
     }
@@ -633,8 +469,6 @@ def run_pipeline(
     if not camera.is_opened():
         print(f"[ERROR] Failed to open camera device /dev/video{cam_index}.", file=sys.stderr)
         face_worker.stop()
-        if sign_worker is not None:
-            sign_worker.stop()
         if mqtt_bridge:
             mqtt_bridge.stop()
         return {"error": "Camera open failure"}
@@ -657,6 +491,10 @@ def run_pipeline(
     vision_grace_until: float = 0.0
     # What the current look is focused on: "people", "objects", or "both".
     vision_target_kind: str | None = None
+    # Identifies one logical look. The brain repeats the same id while it
+    # waits, so a retry does not suppress the scene publish; a new question
+    # gets a new id and therefore a fresh scene even if the view is unchanged.
+    vision_request_id: str = ""
     # On-demand camera window: the pipeline is headless, but a "look" request
     # pops up the live HUD for the duration of the look.
     show_window: bool = False
@@ -664,7 +502,7 @@ def run_pipeline(
     window_opened: bool = False
 
     print("\nInteractive Hotkeys:")
-    print("  1 / 2 / 3 : Toggle Objects, Face ID, or Sign Language modules")
+    print("  1 / 2    : Toggle Objects or Face ID modules")
     print("  l         : Toggle Lazy Mode (sleep idle workers)")
     print("  e         : Trigger hands-free auto-enrollment for 'User'")
     print("  o         : Register / enroll new object held in view")
@@ -726,8 +564,6 @@ def run_pipeline(
                             toggles["1:OBJ"] = bool(args_dict["objects"])
                         if "face" in args_dict:
                             toggles["2:FACE"] = bool(args_dict["face"])
-                        if "sign" in args_dict:
-                            toggles["3:SIGN"] = bool(args_dict["sign"]) and SIGN_ENABLED
                         if contract_id:
                             mqtt_bridge.publish_cmd_result(str(contract_id), True, "modules_updated")
                         else:
@@ -744,9 +580,8 @@ def run_pipeline(
                         elif new_mode in ("all", "active"):
                             toggles["L:LAZY"] = False
                             toggles["1:OBJ"] = toggles["2:FACE"] = True
-                            toggles["3:SIGN"] = False
                         elif new_mode == "idle":
-                            toggles["2:FACE"] = toggles["3:SIGN"] = False
+                            toggles["2:FACE"] = False
                         mqtt_bridge.publish_response(cmd_type, "applied", {"mode": new_mode}, req_id)
 
                     elif cmd_type in ("look", "capture", "activate_vision", "snapshot"):
@@ -755,25 +590,66 @@ def run_pipeline(
                         except (TypeError, ValueError):
                             seconds = 6.0
                         target = str(args_dict.get("target", cmd.get("target", "both"))).lower()
-                        vision_active_until = time.monotonic() + max(1.0, seconds)
-                        vision_grace_until = time.monotonic() + 1.5
+                        request_id = str(
+                            args_dict.get(
+                                "request_id",
+                                cmd.get("request_id", ""),
+                            )
+                        )
+                        now_look = time.monotonic()
+                        # The brain repeats a look while the CV process is still
+                        # loading. Do not restart the grace window on those
+                        # retries, or an empty scene is never published. A new
+                        # request id means a new question, even if the view and
+                        # target have not changed, so force a fresh publish.
                         if target in ("people", "person", "face", "faces"):
-                            vision_target_kind = "people"
+                            next_kind = "people"
+                        elif target in (
+                            "objects",
+                            "object",
+                            "thing",
+                            "things",
+                            "item",
+                            "items",
+                        ):
+                            next_kind = "objects"
+                        else:
+                            next_kind = "both"
+                        continuing = (
+                            now_look < vision_active_until
+                            and next_kind == vision_target_kind
+                            and request_id == vision_request_id
+                        )
+                        vision_target_kind = next_kind
+                        vision_request_id = request_id
+                        vision_active_until = now_look + max(1.0, seconds)
+                        if not continuing:
+                            vision_grace_until = now_look + 1.5
+                        if next_kind == "people":
                             toggles["1:OBJ"] = True
                             toggles["2:FACE"] = True
-                        elif target in ("objects", "object", "thing", "things", "item", "items"):
-                            vision_target_kind = "objects"
+                        elif next_kind == "objects":
                             toggles["1:OBJ"] = True
                             toggles["2:FACE"] = False
                         else:
-                            vision_target_kind = "both"
                             toggles["1:OBJ"] = True
                             toggles["2:FACE"] = True
                         cached_detections = []
-                        last_scene_sig = None  # force a publish once detection runs
-                        show_window = True
-                        show_window_until = time.monotonic() + max(8.0, seconds + 2.0)
-                        print(f"[WINDOW] live camera view opened for {max(8.0, seconds + 2.0):.0f}s (target={target})", flush=True)
+                        if not continuing:
+                            last_scene_sig = None  # force a publish once detection runs
+                        # Keep BMO's face fullscreen: only show the camera HUD
+                        # when the pipeline itself is running interactively.
+                        show_window = not headless
+                        show_window_until = (
+                            time.monotonic() + max(8.0, seconds + 2.0)
+                            if show_window
+                            else 0.0
+                        )
+                        print(
+                            f"[LOOK] vision active for {seconds:.0f}s "
+                            f"(target={target})",
+                            flush=True,
+                        )
                         events_log.append(f"Vision active for {seconds:.0f}s (target={target})")
                         mqtt_bridge.publish_response(
                             cmd_type, "success", {"seconds": seconds, "target": target}, req_id
@@ -1141,37 +1017,18 @@ def run_pipeline(
                     auto_enroll_session = None
 
             # ---------------------------------------------------------------
-            # 4. Sign Language Orchestrator (Lazy Probe or Continuous)
-            # ---------------------------------------------------------------
-            if SIGN_ENABLED and sign_worker is not None and toggles["3:SIGN"]:
-                force_sign = not toggles["L:LAZY"]
-                sign_worker.submit_frame(frame, person_present=person_present, force=force_sign)
-
-            active_sign, active_conf, buf_len, raw_hands, sign_lat, sign_mode = (
-                sign_worker.get_results()
-                if SIGN_ENABLED and sign_worker is not None and toggles["3:SIGN"]
-                else (None, 0.0, 0, None, 0.0, "OFF")
-            )
-
-            # ---------------------------------------------------------------
-            # 5. Synchronize Person Tracks with Face Identities
+            # 4. Synchronize Person Tracks with Face Identities
             # ---------------------------------------------------------------
             synced_objects = synchronizer.sync(detections, faces)
 
             # ---------------------------------------------------------------
-            # 6. Update Short-Term Visual Memory & Check Events
+            # 5. Update Short-Term Visual Memory & Check Events
             # ---------------------------------------------------------------
             short_term_memory.update(synced_objects, frame.shape)
-            if active_sign and active_conf >= SIGN_CONF:
-                # Find signer name if person is present
-                signer_name = synced_objects[0].get("identity") if synced_objects else None
-                short_term_memory.record_sign(active_sign, active_conf, signer=signer_name)
 
             new_events = event_detector.update(
                 objects=synced_objects,
                 faces=faces,
-                sign=active_sign,
-                sign_conf=active_conf,
             )
             for ev in new_events:
                 events_log.append(ev)
@@ -1188,7 +1045,6 @@ def run_pipeline(
                         for p in scene_contract["people"]
                     ),
                     tuple(scene_contract["objects"]),
-                    (scene_contract["last_sign"]["text"] if scene_contract["last_sign"] else None),
                 )
                 if scene_sig != last_scene_sig and (now_sec - last_scene_pub_time >= 1.0):
                     has_content = bool(scene_contract["people"]) or bool(scene_contract["objects"])
@@ -1207,23 +1063,17 @@ def run_pipeline(
                         last_context_pub_time = now_sec
 
             # ---------------------------------------------------------------
-            # 7. Build HUD State & Render
+            # 6. Build HUD State & Render
             # ---------------------------------------------------------------
             state: dict[str, Any] = {
                 "objects": synced_objects,
                 "faces": faces,
-                "sign": active_sign,
-                "sign_conf": active_conf,
-                "sign_buf": buf_len,
-                "seq_len": SEQ_LEN,
-                "raw_hands": raw_hands,
                 "fps": fps,
                 "device": DEVICE,
                 "auto_enroll": enroll_info,
                 "auto_object_enroll": object_enroll_info,
                 "latencies": {
                     "OBJ": obj_latency,
-                    f"SIGN[{sign_mode}]": sign_lat,
                     "FACE": face_lat,
                 },
             }
@@ -1257,12 +1107,6 @@ def run_pipeline(
                 elif k == ord("2"):
                     toggles["2:FACE"] = not toggles["2:FACE"]
                     events_log.append(f"Face ID: {'ON' if toggles['2:FACE'] else 'OFF'}")
-                elif k == ord("3"):
-                    if SIGN_ENABLED:
-                        toggles["3:SIGN"] = not toggles["3:SIGN"]
-                        events_log.append(f"Sign Lang: {'ON' if toggles['3:SIGN'] else 'OFF'}")
-                    else:
-                        events_log.append("Sign Lang: disabled")
                 elif k in (ord("l"), ord("L")):
                     toggles["L:LAZY"] = not toggles["L:LAZY"]
                     events_log.append(f"Lazy Mode: {'ON' if toggles['L:LAZY'] else 'OFF'}")
@@ -1319,8 +1163,6 @@ def run_pipeline(
         print(f"  Session Finished: {frame_count} frames in {total_time:.2f}s ({avg_fps:.1f} FPS)")
         print("=" * 68)
         face_worker.stop()
-        if sign_worker is not None:
-            sign_worker.stop()
         camera.release()
         if mqtt_bridge is not None:
             mqtt_bridge.stop()

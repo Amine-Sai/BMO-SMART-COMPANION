@@ -1,4 +1,4 @@
-"""Speaker and signer attribution based on visual scene context."""
+"""Speaker attribution based on visual scene context."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ def _is_known(name: str) -> bool:
 
 
 def attribute_speaker(scene_or_cache: Scene | SceneCache | None) -> str:
-    """Attribute a spoken or signed utterance to a person in the scene."""
+    """Attribute a spoken utterance to a person in the scene."""
     if isinstance(scene_or_cache, SceneCache):
         scene = scene_or_cache.current()
     else:

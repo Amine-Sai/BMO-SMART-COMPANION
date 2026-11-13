@@ -41,7 +41,6 @@ from brain.audio.tts import TextToSpeech
 from brain.audio.vad import VoiceActivityDetector
 from brain.audio.wake import WakeWordDetector
 from brain.edge_monitor import EdgeMonitor
-from brain.inputs.sign import SignInputHandler
 from brain.lifecycle import IdleLifecycleManager
 from brain.llm import LLMClient
 from brain.policy import ProactivePolicy
@@ -133,20 +132,12 @@ class BrainService:
             greeting_cooldown_s=900.0,
             global_cooldown_s=30.0,
             walk_by_window_s=1.5,
-            sign_min_conf=0.75,
-            sign_debounce_s=2.0,
             idle_unload_s=300.0,
         )
         self.policy = ProactivePolicy(
             settings=policy_settings,
             state_machine=self.state_machine,
             on_greet=self._on_proactive_greet,
-            clock=self._clock,
-        )
-        self.sign_handler = SignInputHandler(
-            settings=policy_settings,
-            state_machine=self.state_machine,
-            on_turn=self._on_sign_turn,
             clock=self._clock,
         )
         self.lifecycle = IdleLifecycleManager(
@@ -173,10 +164,6 @@ class BrainService:
     def _on_proactive_greet(self, greeting: str) -> None:
         if self.state_machine.state == BrainState.IDLE:
             self.turn_manager.start_text_turn(greeting)
-
-    def _on_sign_turn(self, sign_text: str) -> None:
-        if self.state_machine.state == BrainState.IDLE:
-            self.turn_manager.start_text_turn(sign_text)
 
     def _on_connect(
         self,
@@ -239,7 +226,6 @@ class BrainService:
         elif topic == VISION_EVENTS:
             event = parse_event_json(payload)
             self.policy.handle_event(event)
-            self.sign_handler.handle_event(event)
             self.lifecycle.handle_event(event)
         elif topic == HW_STATUS:
             hw_status = HwStatus.model_validate_json(payload)

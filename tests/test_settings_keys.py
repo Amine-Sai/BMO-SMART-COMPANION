@@ -61,8 +61,6 @@ def test_settings_classes_default_instantiation() -> None:
         greeting_cooldown_s=900.0,
         global_cooldown_s=30.0,
         walk_by_window_s=1.5,
-        sign_min_conf=0.75,
-        sign_debounce_s=2.0,
         idle_unload_s=300.0,
     )
     assert policy.tick_interval_s == 1.0
