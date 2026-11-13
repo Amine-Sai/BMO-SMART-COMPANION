@@ -1,4 +1,4 @@
-"""Unit tests verifying all new settings tunables and edge configuration."""
+"""Unit tests verifying all new settings tunables."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ from pydantic import ValidationError
 
 from brain.settings import (
     AudioSettings,
-    EdgeSettings,
     LLMSettings,
     PolicySettings,
     SceneSettings,
@@ -37,10 +36,6 @@ def test_load_settings_contains_all_tunables_with_defaults() -> None:
     assert settings.audio.vad_preroll_ms == 250
     assert settings.audio.tts_max_clause_chars == 80
 
-    # edge
-    assert settings.edge is not None
-    assert settings.edge.failover_debounce == 3
-
     # policy
     assert settings.policy is not None
     assert settings.policy.tick_interval_s == 1.0
@@ -54,7 +49,6 @@ def test_settings_classes_default_instantiation() -> None:
     assert AudioSettings().vad_chunk_samples == 512
     assert AudioSettings().vad_preroll_ms == 250
     assert AudioSettings().tts_max_clause_chars == 80
-    assert EdgeSettings().failover_debounce == 3
 
     policy = PolicySettings(
         face_min_conf=0.65,
@@ -66,23 +60,23 @@ def test_settings_classes_default_instantiation() -> None:
     assert policy.tick_interval_s == 1.0
 
 
-def test_edge_settings_frozen_and_extra_forbidden() -> None:
-    """Verify EdgeSettings enforces immutability and forbids unknown keys."""
-    edge = EdgeSettings()
-    assert edge.failover_debounce == 3
+def test_audio_settings_frozen_and_extra_forbidden() -> None:
+    """Verify AudioSettings enforces immutability and forbids unknown keys."""
+    audio = AudioSettings()
+    assert audio.vad_chunk_samples == 512
 
     with pytest.raises(ValidationError):
-        edge.failover_debounce = 5  # type: ignore[misc]
+        audio.vad_chunk_samples = 5  # type: ignore[misc]
 
     with pytest.raises(ValidationError):
-        EdgeSettings(unknown="foo")  # type: ignore[call-arg]
+        AudioSettings(unknown="foo")  # type: ignore[call-arg]
 
 
-def test_edge_yaml_loaded_standalone() -> None:
-    """Verify edge.yaml loads correctly in isolation."""
+def test_audio_yaml_loaded_standalone() -> None:
+    """Verify audio.yaml loads correctly in isolation."""
     with tempfile.TemporaryDirectory() as temp_dir:
-        edge_file = Path(temp_dir) / "edge.yaml"
-        edge_file.write_text("edge:\n  failover_debounce: 5\n", encoding="utf-8")
+        audio_file = Path(temp_dir) / "audio.yaml"
+        audio_file.write_text("audio:\n  vad_chunk_samples: 1024\n", encoding="utf-8")
         settings = load_settings(temp_dir)
-        assert settings.edge is not None
-        assert settings.edge.failover_debounce == 5
+        assert settings.audio is not None
+        assert settings.audio.vad_chunk_samples == 1024

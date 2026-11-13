@@ -17,8 +17,6 @@ from pydantic import ValidationError
 from bmo_contracts.models import (
     FaceData,
     FaceIdentified,
-    HwEvent,
-    HwStatus,
     PersonData,
     PersonDetected,
     Scene,
@@ -28,8 +26,6 @@ from bmo_contracts.models import (
 )
 from bmo_contracts.topics import (
     BRAIN_STATUS,
-    HW_EVENT,
-    HW_STATUS,
     VISION_CMD_RESULT,
     VISION_CONTEXT,
     VISION_EVENTS,
@@ -178,8 +174,6 @@ class BrainService:
                 (VISION_CONTEXT, 0),
                 (VISION_STATUS, 1),
                 (VISION_EVENTS, 1),
-                (HW_STATUS, 1),
-                (HW_EVENT, 1),
                 (VISION_CMD_RESULT, 1),
             ]
         )
@@ -227,12 +221,6 @@ class BrainService:
             event = parse_event_json(payload)
             self.policy.handle_event(event)
             self.lifecycle.handle_event(event)
-        elif topic == HW_STATUS:
-            hw_status = HwStatus.model_validate_json(payload)
-            self.edge_monitor.handle_hw_status(hw_status)
-        elif topic == HW_EVENT:
-            hw_event = HwEvent.model_validate_json(payload)
-            self.edge_monitor.handle_hw_event(hw_event)
         elif topic == VISION_CMD_RESULT:
             cmd_result = VisionCmdResult.model_validate_json(payload)
             self.vision_client.handle_cmd_result(cmd_result)

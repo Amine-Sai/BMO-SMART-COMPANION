@@ -11,14 +11,12 @@ import unittest
 from bmo_contracts.models import (
     FaceData,
     FaceIdentified,
-    HwStatus,
     Scene,
     ScenePerson,
     VisionStatus,
 )
 from bmo_contracts.topics import (
     BRAIN_SAY,
-    HW_CMD,
     TOPICS,
     VISION_CONTEXT,
     VISION_EVENTS,
@@ -177,11 +175,8 @@ class TestSecurityAndFailureInjection(unittest.TestCase):
         # Brain cannot publish to vision event topic
         self.assertNotIn("brain", TOPICS[VISION_EVENTS].pub_roles)
 
-        # Pi cannot publish to vision context
-        self.assertNotIn("pi", TOPICS[VISION_CONTEXT].pub_roles)
-
-        # ESP32 can only publish to hw/status
-        self.assertNotIn("esp32", TOPICS[HW_CMD].pub_roles)
+        # CV cannot subscribe to vision context
+        self.assertNotIn("cv", TOPICS[VISION_CONTEXT].sub_roles)
 
     def test_failure_injection_llm_timeout_recovers_to_idle(self) -> None:
         """Injected LLM timeout should not crash the turn or leave brain in thinking state."""
@@ -240,21 +235,28 @@ class TestSecurityAndFailureInjection(unittest.TestCase):
             state_machine=self.state_machine,
             fallback_source=MemorySource(pcm=b""),
             fallback_sink=MemorySink(),
-            edge_source=MemorySource(pcm=b""),
-            edge_sink=MemorySink(),
-            heartbeat_timeout_s=5.0,
             clock=lambda: clock_time,
         )
 
-        monitor.handle_hw_status(HwStatus(ts=clock_time, online=True, capabilities=["audio_in", "audio_out"]))
+        # Edge monitor is always online locally (no external hardware)
         self.assertTrue(monitor.edge_online)
 
-        # Advance past timeout
+        # Advance time - still online
         clock_time = 1010.0
-        self.assertFalse(monitor.edge_online)
-        # Sinks and sources route to fallback
+        self.assertTrue(monitor.edge_online)
+        # Sinks and sources route to fallback (local)
         self.assertIsInstance(monitor.active_sink, MemorySink)
         self.assertIsInstance(monitor.active_source, MemorySource)
+
+        # Test mute switch
+        monitor.handle_hw_event({"kind": "mute_switch", "value": True})
+        self.assertTrue(monitor.muted)
+        self.assertIsNone(monitor.active_source)
+        self.assertEqual(self.state_machine.state, BrainState.MUTED)
+
+        monitor.handle_hw_event({"kind": "mute_switch", "value": False})
+        self.assertFalse(monitor.muted)
+        self.assertEqual(self.state_machine.state, BrainState.IDLE)
 
 
 if __name__ == "__main__":

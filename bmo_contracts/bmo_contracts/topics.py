@@ -8,16 +8,13 @@ from .models import (
     EVENT_ADAPTER,
     BrainSay,
     BrainStatus,
-    HwCmd,
-    HwEvent,
-    HwStatus,
     Scene,
     VisionCmd,
     VisionCmdResult,
     VisionStatus,
 )
 
-Role = Literal["cv", "brain", "pi", "esp32"]
+Role = Literal["cv", "brain"]
 
 
 @dataclass(frozen=True)
@@ -40,9 +37,6 @@ VISION_CMD = "bmo/vision/cmd"
 VISION_CMD_RESULT = "bmo/vision/cmd_result"
 BRAIN_STATUS = "bmo/brain/status"
 BRAIN_SAY = "bmo/brain/say"
-HW_CMD = "bmo/hw/cmd"
-HW_STATUS = "bmo/hw/status"
-HW_EVENT = "bmo/hw/event"
 
 # Wildcard topic for monitoring tools
 VISION_WILDCARD = "bmo/vision/#"
@@ -54,7 +48,7 @@ TOPICS: dict[str, TopicSpec] = {
         retain=True,
         model=VisionStatus,
         pub_roles=("cv",),
-        sub_roles=("brain", "pi"),
+        sub_roles=("brain",),
     ),
     VISION_EVENTS: TopicSpec(
         name=VISION_EVENTS,
@@ -94,7 +88,7 @@ TOPICS: dict[str, TopicSpec] = {
         retain=True,
         model=BrainStatus,
         pub_roles=("brain",),
-        sub_roles=("cv", "pi"),
+        sub_roles=("cv",),
     ),
     BRAIN_SAY: TopicSpec(
         name=BRAIN_SAY,
@@ -102,30 +96,6 @@ TOPICS: dict[str, TopicSpec] = {
         retain=False,
         model=BrainSay,
         pub_roles=("brain",),
-        sub_roles=("pi",),
-    ),
-    HW_CMD: TopicSpec(
-        name=HW_CMD,
-        qos=1,
-        retain=False,
-        model=HwCmd,
-        pub_roles=("brain",),
-        sub_roles=("pi", "esp32"),
-    ),
-    HW_STATUS: TopicSpec(
-        name=HW_STATUS,
-        qos=1,
-        retain=True,
-        model=HwStatus,
-        pub_roles=("pi", "esp32"),
-        sub_roles=("brain",),
-    ),
-    HW_EVENT: TopicSpec(
-        name=HW_EVENT,
-        qos=1,
-        retain=False,
-        model=HwEvent,
-        pub_roles=("pi", "esp32"),
-        sub_roles=("brain",),
+        sub_roles=(),
     ),
 }

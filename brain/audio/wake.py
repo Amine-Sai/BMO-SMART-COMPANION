@@ -10,16 +10,16 @@ import numpy as np
 from brain.settings import AudioSettings
 
 
-# openWakeWord has no "hey bmo" model, so wake detection reuses the STT engine.
-# Whisper renders "BMO" in many ways: bmo / beemo / bemo / bimo / "be mo" /
-# "b m o" / "be more" / vmo / pmo. Accept the wake word with or without a
-# greeting prefix.
+# BMO is pronounced "Bee MO" (B-M-O). Whisper renders it in many ways:
+# bee mo / bee-mo / bee.mo / bmo / beemo / bemo / bimo / "b m o" / "be more" /
+# vmo / pmo. Accept the wake word with or without a greeting prefix.
 _WAKE_PREFIXES = r"(?:hey|hi|hay|hello|okay|ok|yo|o)"
 _BMO_VARIANTS = (
     r"(?:"
     r"b[\s.\-]*m[\s.\-]*o"
     r"|p[\s.\-]*m[\s.\-]*o"
     r"|v[\s.\-]*m[\s.\-]*o"
+    r"|bee[\s.\-]*mo"
     r"|be+[\s.\-]*mo"
     r"|bi+mo"
     r"|be+mer"
@@ -33,13 +33,13 @@ _WAKE_RE = re.compile(
 )
 
 
-def extract_wake_command(text: str, wake_word: str = "hey bmo") -> str | None:
-    """Return the command following "hey bmo" in ``text``.
+def extract_wake_command(text: str, wake_word: str = "hey bee mo") -> str | None:
+    """Return the command following "hey bee mo" in ``text``.
 
     Returns ``None`` when the utterance is not addressed to BMO, an empty
     string when only the wake phrase was spoken, or the trailing command text.
     """
-    del wake_word  # currently specialised for "hey bmo"
+    del wake_word  # currently specialised for "hey bee mo"
     match = _WAKE_RE.search(text)
     if match is None:
         return None

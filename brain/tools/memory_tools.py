@@ -23,6 +23,16 @@ class ForgetFactArgs(StrictArgs):
     key: str = Field(min_length=1, max_length=80)
 
 
+class RememberPersonArgs(StrictArgs):
+    name: str = Field(min_length=1, max_length=50)
+    details: str = Field(min_length=1, max_length=500)
+
+
+class RememberObjectArgs(StrictArgs):
+    name: str = Field(min_length=1, max_length=50)
+    details: str = Field(min_length=1, max_length=500)
+
+
 class MemoryTools:
     def __init__(self, memory: LongTermMemory) -> None:
         self._memory = memory
@@ -44,6 +54,22 @@ class MemoryTools:
     def list_facts(self, _args: EmptyArgs | dict[str, Any] | None = None, **_kwargs: Any) -> dict[str, Any]:
         rows = self._memory.items()
         return {"ok": True, "facts": rows, "count": len(rows)}
+
+    def remember_person(self, args: RememberPersonArgs) -> dict[str, Any]:
+        item = self._memory.remember_person(args.name, args.details)
+        return {"ok": True, "item": item}
+
+    def remember_object(self, args: RememberObjectArgs) -> dict[str, Any]:
+        item = self._memory.remember_object(args.name, args.details)
+        return {"ok": True, "item": item}
+
+    def list_people(self, _args: EmptyArgs | dict[str, Any] | None = None, **_kwargs: Any) -> dict[str, Any]:
+        rows = self._memory.get_people()
+        return {"ok": True, "people": rows, "count": len(rows)}
+
+    def list_objects(self, _args: EmptyArgs | dict[str, Any] | None = None, **_kwargs: Any) -> dict[str, Any]:
+        rows = self._memory.get_objects()
+        return {"ok": True, "objects": rows, "count": len(rows)}
 
 
 def register_memory_tools(registry: ToolRegistry, memory: LongTermMemory) -> MemoryTools:
@@ -85,6 +111,42 @@ def register_memory_tools(registry: ToolRegistry, memory: LongTermMemory) -> Mem
             description="List everything currently saved in long-term memory.",
             schema=EmptyArgs,
             handler=tools.list_facts,
+            risky=False,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="remember_person",
+            description="Remember a person BMO has met (name and details).",
+            schema=RememberPersonArgs,
+            handler=tools.remember_person,
+            risky=False,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="remember_object",
+            description="Remember an object BMO has learned (name and description).",
+            schema=RememberObjectArgs,
+            handler=tools.remember_object,
+            risky=False,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="list_people",
+            description="List all people BMO remembers.",
+            schema=EmptyArgs,
+            handler=tools.list_people,
+            risky=False,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="list_objects",
+            description="List all objects BMO remembers.",
+            schema=EmptyArgs,
+            handler=tools.list_objects,
             risky=False,
         )
     )

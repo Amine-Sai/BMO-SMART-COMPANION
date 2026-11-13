@@ -1,0 +1,67 @@
+# Virtual Environments
+.venv/
+env/
+venv/
+
+# Python cache & artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+graphify-out/
+
+# Model weights & downloads (auto-downloaded on first run)
+weights/
+models/*.gguf
+models/piper/en_US-*
+assistant_cv/models/*.pt
+assistant_cv/models/*.task
+assistant_cv/models/*.onnx
+
+# Local biometric & dataset directories
+assistant_cv/gallery/
+assistant_cv/data/*/*.npy
+
+# Local long-term memory
+data/
+
+# Mock & test fixtures (contain synthetic biometric data)
+tools/mock_cv.py
+tests/fixtures/
+
+# Secrets & credentials
+.env
+.env.*
+*.key
+*.pem
+*.crt
+secrets.yaml
+config/secrets/
+
+# IDE & editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Coverage & reports
+.coverage
+htmlcov/
+.pytest_cache/
+*.prof
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp

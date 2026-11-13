@@ -16,7 +16,16 @@ def _norm_key(key: str) -> str:
 
 
 class LongTermMemory:
-    """Small JSON-backed store for facts BMO should remember across sessions."""
+    """Small JSON-backed store for facts BMO should remember across sessions.
+    
+    Categories:
+    - fact: general facts
+    - preference: user preferences
+    - identity: user identity info
+    - person: people BMO has met (name, details)
+    - object: objects BMO has learned (name, description)
+    - note: generic notes
+    """
 
     def __init__(self, path: str | Path = DEFAULT_MEMORY_PATH, max_prompt_items: int = 15) -> None:
         self.path = Path(path)
@@ -75,6 +84,14 @@ class LongTermMemory:
             self._save_locked()
         return dict(item)
 
+    def remember_person(self, name: str, details: str) -> dict[str, Any]:
+        """Remember a person BMO has met."""
+        return self.remember(f"person {name}", details, category="person")
+
+    def remember_object(self, name: str, details: str) -> dict[str, Any]:
+        """Remember an object BMO has learned."""
+        return self.remember(f"object {name}", details, category="object")
+
     def forget(self, key: str) -> bool:
         norm = _norm_key(key)
         with self._lock:
@@ -102,6 +119,22 @@ class LongTermMemory:
             ]
         hits.sort(key=lambda item: item.get("updated_at", 0), reverse=True)
         return hits[: max(1, limit)]
+
+    def get_people(self) -> list[dict[str, Any]]:
+        """Get all remembered people."""
+        with self._lock:
+            return [
+                dict(item) for key, item in self._items.items()
+                if item.get("category") == "person" and key.startswith("person ")
+            ]
+
+    def get_objects(self) -> list[dict[str, Any]]:
+        """Get all remembered objects."""
+        with self._lock:
+            return [
+                dict(item) for key, item in self._items.items()
+                if item.get("category") == "object" and key.startswith("object ")
+            ]
 
     def items(self) -> list[dict[str, Any]]:
         with self._lock:

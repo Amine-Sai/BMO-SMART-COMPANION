@@ -71,14 +71,6 @@ class PolicySettings(BaseModel):
     tick_interval_s: float = 1.0
 
 
-class EdgeSettings(BaseModel):
-    """Configuration for edge hardware and failover."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    failover_debounce: int = 3
-
-
 class Settings(BaseModel):
     """Root configuration holding all subsystem settings."""
 
@@ -88,7 +80,6 @@ class Settings(BaseModel):
     scene: SceneSettings | None = None
     audio: AudioSettings | None = None
     policy: PolicySettings | None = None
-    edge: EdgeSettings | None = None
 
 
 def load_settings(settings_dir: str | Path = "config/settings.d") -> Settings:

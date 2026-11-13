@@ -11,7 +11,6 @@ from pydantic import BaseModel, ConfigDict
 
 from bmo_contracts.models import (
     FaceIdentified,
-    HwEvent,
     PersonLeft,
     Scene,
     VisionStatus,
@@ -143,7 +142,7 @@ class TestDeterministicReplaySuite(unittest.TestCase):
         with FIXTURE_PATH.open("r", encoding="utf-8") as f:
             lines = [json.loads(line) for line in f if line.strip()]
 
-        self.assertEqual(len(lines), 7)
+        self.assertEqual(len(lines), 6)
 
         # Step 1: vision_status
         step1 = lines[0]
@@ -232,10 +231,3 @@ class TestDeterministicReplaySuite(unittest.TestCase):
         self.current_time = 1010.0
         self.policy.handle_event(evt7)
         self.assertEqual(self.state_machine.state, BrainState.IDLE)
-
-        # Step 8: hw_event -> mute switch
-        step8 = lines[6]
-        self.assertEqual(step8["type"], "hw_event")
-        hw_evt = HwEvent.model_validate(step8["payload"])
-        self.edge_monitor.handle_hw_event(hw_evt)
-        self.assertEqual(self.state_machine.state, BrainState.MUTED)

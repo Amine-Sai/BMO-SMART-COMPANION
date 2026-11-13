@@ -18,17 +18,11 @@ from bmo_contracts.models import (
     EnrollArgs,
     FaceIdentified,
     ForgetArgs,
-    HwCmd,
-    HwEvent,
-    HwStatus,
-    MoveServoArgs,
     ObjectSeen,
     PersonDetected,
     PersonLeft,
     PersonName,
-    PlaySoundArgs,
     Scene,
-    SetExpressionArgs,
     VisionCmd,
     VisionCmdResult,
     VisionStatus,
@@ -60,7 +54,7 @@ class TestSection43Examples(unittest.TestCase):
         sec_text = sec_match.group(0)
 
         self.json_blocks = re.findall(r"```json\s*(\{.*?\})\s*```", sec_text, re.DOTALL)
-        self.assertGreaterEqual(len(self.json_blocks), 13, "Expected at least 13 JSON examples in Section 4.3")
+        self.assertGreaterEqual(len(self.json_blocks), 10, "Expected at least 10 JSON examples in Section 4.3")
 
     def test_all_verbatim_examples_validate(self):
         """Validate each Section 4.3 verbatim JSON example against its corresponding model."""
@@ -73,60 +67,45 @@ class TestSection43Examples(unittest.TestCase):
         self.assertTrue(bs.online)
         self.assertEqual(bs.state, "listening")
 
-        # 3. HwStatus
-        hs = HwStatus.model_validate_json(self.json_blocks[2])
-        self.assertTrue(hs.online)
-        self.assertIn("display", hs.capabilities)
-
-        # 4. HwEvent
-        he = HwEvent.model_validate_json(self.json_blocks[3])
-        self.assertEqual(he.kind, "mute_switch")
-        self.assertTrue(he.value)
-
-        # 5. FaceIdentified Event
-        ev_face = parse_event_json(self.json_blocks[4])
+        # 3. FaceIdentified Event
+        ev_face = parse_event_json(self.json_blocks[2])
         self.assertIsInstance(ev_face, FaceIdentified)
         self.assertEqual(ev_face.data.name, "Alice")
-        ev_val = validate_event(json.loads(self.json_blocks[4]))
+        ev_val = validate_event(json.loads(self.json_blocks[2]))
         self.assertIsInstance(ev_val, FaceIdentified)
 
-        # 6. PersonDetected Event
-        ev_p = parse_event_json(self.json_blocks[5])
+        # 4. PersonDetected Event
+        ev_p = parse_event_json(self.json_blocks[3])
         self.assertIsInstance(ev_p, PersonDetected)
         self.assertEqual(ev_p.data.proximity, "near")
 
-        # 7. PersonLeft Event
-        ev_pl = parse_event_json(self.json_blocks[6])
+        # 5. PersonLeft Event
+        ev_pl = parse_event_json(self.json_blocks[4])
         self.assertIsInstance(ev_pl, PersonLeft)
         self.assertEqual(ev_pl.data.track_id, 1)
 
-        # 8. ObjectSeen Event
-        ev_os = parse_event_json(self.json_blocks[7])
+        # 6. ObjectSeen Event
+        ev_os = parse_event_json(self.json_blocks[5])
         self.assertIsInstance(ev_os, ObjectSeen)
         self.assertEqual(ev_os.data.label, "cup")
 
-        # 9. Scene Context
-        scene = Scene.model_validate_json(self.json_blocks[8])
+        # 7. Scene Context
+        scene = Scene.model_validate_json(self.json_blocks[6])
         self.assertEqual(len(scene.people), 1)
         self.assertEqual(scene.people[0].name, "Alice")
         self.assertIn("cup", scene.objects)
 
-        # 10. VisionCmd
-        vc = VisionCmd.model_validate_json(self.json_blocks[9])
+        # 8. VisionCmd
+        vc = VisionCmd.model_validate_json(self.json_blocks[7])
         self.assertEqual(vc.cmd, "reload_gallery")
 
-        # 11. VisionCmdResult
-        vcr = VisionCmdResult.model_validate_json(self.json_blocks[10])
+        # 9. VisionCmdResult
+        vcr = VisionCmdResult.model_validate_json(self.json_blocks[8])
         self.assertTrue(vcr.ok)
 
-        # 12. BrainSay
-        bsay = BrainSay.model_validate_json(self.json_blocks[11])
+        # 10. BrainSay
+        bsay = BrainSay.model_validate_json(self.json_blocks[9])
         self.assertEqual(bsay.emotion, Emotion.HAPPY)
-
-        # 13. HwCmd
-        hwcmd = HwCmd.model_validate_json(self.json_blocks[12])
-        self.assertEqual(hwcmd.target, "pi")
-        self.assertEqual(hwcmd.action, "set_expression")
 
 
 class TestContractValidationStrictness(unittest.TestCase):
@@ -261,14 +240,15 @@ class TestMQTTBridgeContractConformance(unittest.TestCase):
         self.assertEqual(ev3.data.label, "pen")
 
     def test_topic_registry_coverage(self):
-        """All 10 canonical topics exist in TOPICS registry with valid TopicSpec."""
-        self.assertEqual(len(TOPICS), 10)
+        """All 7 canonical topics exist in TOPICS registry with valid TopicSpec."""
+        self.assertEqual(len(TOPICS), 7)
         for topic_name, spec in TOPICS.items():
             self.assertEqual(spec.name, topic_name)
             self.assertIn(spec.qos, (0, 1))
             self.assertIsInstance(spec.retain, bool)
             self.assertGreater(len(spec.pub_roles), 0)
-            self.assertGreater(len(spec.sub_roles), 0)
+            # sub_roles can be empty for BRAIN_SAY (local TTS only)
+            self.assertIsInstance(spec.sub_roles, tuple)
 
 
 class TestT1SchemaEnhancements(unittest.TestCase):
@@ -290,12 +270,6 @@ class TestT1SchemaEnhancements(unittest.TestCase):
         bs = BrainStatus(online=True, state="idle")
         self.assertEqual(bs.v, 1)
 
-        hs = HwStatus(online=True, ts=1.0, capabilities=["lcd"])
-        self.assertEqual(hs.v, 1)
-
-        he = HwEvent(ts=1.0, kind="mute_switch", value=False)
-        self.assertEqual(he.v, 1)
-
         sc = Scene(ts=1.0, people=[], objects=[], recent=[])
         self.assertEqual(sc.v, 1)
 
@@ -308,21 +282,12 @@ class TestT1SchemaEnhancements(unittest.TestCase):
         bsay = BrainSay(utt_id="utt-1", text="hi", emotion=Emotion.NEUTRAL)
         self.assertEqual(bsay.v, 1)
 
-        hwcmd = HwCmd(id="hw-1", target="pi", action="set_expression", args={"emotion": "neutral"})
-        self.assertEqual(hwcmd.v, 1)
-
     def test_invalid_envelope_version_rejected(self):
         with self.assertRaises(ValidationError):
             VisionStatus.model_validate_json('{"v": 2, "online": true}')
 
         with self.assertRaises(ValidationError):
             BrainStatus.model_validate_json('{"v": 2, "online": true, "state": "idle"}')
-
-        with self.assertRaises(ValidationError):
-            HwStatus.model_validate_json('{"v": 99, "online": true, "ts": 1.0, "capabilities": []}')
-
-        with self.assertRaises(ValidationError):
-            HwEvent.model_validate_json('{"v": 0, "ts": 1.0, "kind": "mute_switch", "value": false}')
 
         with self.assertRaises(ValidationError):
             Scene.model_validate_json('{"v": 2, "ts": 1.0, "people": [], "objects": [], "recent": []}')
@@ -335,11 +300,6 @@ class TestT1SchemaEnhancements(unittest.TestCase):
 
         with self.assertRaises(ValidationError):
             BrainSay.model_validate_json('{"v": 2, "utt_id": "1", "text": "hi", "emotion": "neutral"}')
-
-        with self.assertRaises(ValidationError):
-            HwCmd.model_validate_json(
-                '{"v": 2, "id": "1", "target": "pi", "action": "set_expression", "args": {"emotion": "happy"}}'
-            )
 
     def test_vision_cmd_result_data(self):
         # Default is None
@@ -409,87 +369,6 @@ class TestT1SchemaEnhancements(unittest.TestCase):
 
         with self.assertRaises(ValidationError):
             VisionCmd(id="5", cmd="enroll", args={"name": ""})
-
-    def test_hw_cmd_set_expression_args_validation(self):
-        # Valid emotion
-        cmd = HwCmd(id="1", target="pi", action="set_expression", args={"emotion": "happy"})
-        self.assertEqual(cmd.args["emotion"], Emotion.HAPPY)
-
-        # Accepts "expression" key and normalizes to emotion
-        cmd_expr = HwCmd(id="2", target="pi", action="set_expression", args={"expression": "happy"})
-        self.assertEqual(cmd_expr.args["emotion"], Emotion.HAPPY)
-
-        # Typed SetExpressionArgs
-        typed_args = SetExpressionArgs(emotion=Emotion.SAD)
-        cmd_typed = HwCmd(id="3", target="pi", action="set_expression", args=typed_args)
-        self.assertEqual(cmd_typed.args["emotion"], Emotion.SAD)
-        self.assertEqual(typed_args["emotion"], Emotion.SAD)
-        self.assertEqual(typed_args.get_expression(), "sad")
-
-        # Invalid emotion rejected
-        with self.assertRaises(ValidationError):
-            HwCmd(id="4", target="pi", action="set_expression", args={"emotion": "bogus"})
-
-        # Extra fields forbidden
-        with self.assertRaises(ValidationError):
-            HwCmd(id="5", target="pi", action="set_expression", args={"emotion": "happy", "extra": True})
-
-    def test_hw_cmd_move_servo_args_validation(self):
-        # Valid servo
-        cmd = HwCmd(id="1", target="esp32", action="move_servo", args={"id": "pan", "angle": 45.0})
-        self.assertEqual(cmd.args["id"], "pan")
-        self.assertEqual(cmd.args["angle"], 45.0)
-
-        # Valid arms and tilt
-        for sid in ("pan", "tilt", "left_arm", "right_arm"):
-            cmd_arm = HwCmd(id="2", target="esp32", action="move_servo", args={"id": sid, "angle": 0})
-            self.assertEqual(cmd_arm.args["id"], sid)
-
-        # Typed MoveServoArgs
-        typed_args = MoveServoArgs(id="tilt", angle=15.0)
-        cmd_typed = HwCmd(id="3", target="esp32", action="move_servo", args=typed_args)
-        self.assertEqual(cmd_typed.args["id"], "tilt")
-        self.assertEqual(cmd_typed.args["angle"], 15.0)
-        self.assertEqual(typed_args["id"], "tilt")
-
-        # Invalid servo id rejected
-        with self.assertRaises(ValidationError):
-            HwCmd(id="4", target="esp32", action="move_servo", args={"id": "head", "angle": 0.0})
-
-        # Extra fields forbidden
-        with self.assertRaises(ValidationError):
-            HwCmd(id="5", target="esp32", action="move_servo", args={"id": "pan", "angle": 0.0, "speed": 100})
-
-    def test_hw_cmd_play_sound_args_validation(self):
-        # Valid name
-        cmd = HwCmd(id="1", target="pi", action="play_sound", args={"name": "chime"})
-        self.assertEqual(cmd.args["name"], "chime")
-
-        # Sound file name with dot (e.g. ping.wav)
-        cmd_wav = HwCmd(id="2", target="pi", action="play_sound", args={"name": "ping.wav"})
-        self.assertEqual(cmd_wav.args["name"], "ping.wav")
-
-        # Accepts "sound" key and normalizes
-        cmd_sound = HwCmd(id="3", target="pi", action="play_sound", args={"sound": "chime"})
-        self.assertEqual(cmd_sound.args["name"], "chime")
-
-        # Typed PlaySoundArgs
-        typed_args = PlaySoundArgs(name="confirm")
-        cmd_typed = HwCmd(id="4", target="pi", action="play_sound", args=typed_args)
-        self.assertEqual(cmd_typed.args["name"], "confirm")
-        self.assertEqual(typed_args["name"], "confirm")
-        self.assertEqual(typed_args.get_sound(), "confirm")
-
-        # Path traversal rejected
-        with self.assertRaises(ValidationError):
-            HwCmd(id="5", target="pi", action="play_sound", args={"name": "../traversal"})
-
-        with self.assertRaises(ValidationError):
-            HwCmd(id="6", target="pi", action="play_sound", args={"name": "dir/sound.wav"})
-
-        # Extra fields forbidden
-        with self.assertRaises(ValidationError):
-            HwCmd(id="7", target="pi", action="play_sound", args={"name": "chime", "volume": 10})
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 # BMO Contracts Specification
 
-This document defines the inter-process communication contracts for the BMO Assistant ecosystem across Computer Vision (`cv`), LLM & Dialogue Orchestrator (`brain`), Edge/Audio compute (`pi`), and Microcontrollers (`esp32`).
+This document defines the inter-process communication contracts for the BMO Assistant ecosystem across Computer Vision (`cv`) and LLM & Dialogue Orchestrator (`brain`).
 
 ---
 
@@ -10,16 +10,13 @@ All topics are statically declared in `bmo_contracts.topics`. String literals re
 
 | Constant | Topic | Dir | QoS | Retain | Model | Pub Roles | Sub Roles |
 |---|---|---|---|---|---|---|---|
-| `VISION_STATUS` | `bmo/vision/status` | cv → all | 1 | yes (+LWT) | `VisionStatus` | `cv` | `brain`, `pi` |
+| `VISION_STATUS` | `bmo/vision/status` | cv → all | 1 | yes (+LWT) | `VisionStatus` | `cv` | `brain` |
 | `VISION_EVENTS` | `bmo/vision/events` | cv → brain | 1 | no | `Event` | `cv` | `brain` |
 | `VISION_CONTEXT` | `bmo/vision/context` | cv → brain | 0 | yes | `Scene` | `cv` | `brain` |
 | `VISION_CMD` | `bmo/vision/cmd` | brain → cv | 1 | no | `VisionCmd` | `brain` | `cv` |
 | `VISION_CMD_RESULT` | `bmo/vision/cmd_result` | cv → brain | 1 | no | `VisionCmdResult` | `cv` | `brain` |
-| `BRAIN_STATUS` | `bmo/brain/status` | brain → all | 1 | yes (+LWT) | `BrainStatus` | `brain` | `cv`, `pi` |
-| `BRAIN_SAY` | `bmo/brain/say` | brain → pi | 1 | no | `BrainSay` | `brain` | `pi` |
-| `HW_CMD` | `bmo/hw/cmd` | brain → edge | 1 | no | `HwCmd` | `brain` | `pi`, `esp32` |
-| `HW_STATUS` | `bmo/hw/status` | edge → all | 1 | yes (+LWT) | `HwStatus` | `pi`, `esp32` | `brain` |
-| `HW_EVENT` | `bmo/hw/event` | edge → brain | 1 | no | `HwEvent` | `pi`, `esp32` | `brain` |
+| `BRAIN_STATUS` | `bmo/brain/status` | brain → all | 1 | yes (+LWT) | `BrainStatus` | `brain` | `cv` |
+| `BRAIN_SAY` | `bmo/brain/say` | brain → local TTS | 1 | no | `BrainSay` | `brain` | |
 
 ---
 
@@ -46,25 +43,7 @@ All contract payloads are validated using Pydantic v2 with strict schema enforce
 }
 ```
 
-### 3. HwStatus (`bmo/hw/status`)
-```json
-{
-  "online": true,
-  "ts": 1700000000.0,
-  "capabilities": ["display", "audio", "servo"]
-}
-```
-
-### 4. HwEvent (`bmo/hw/event`)
-```json
-{
-  "ts": 1700000000.123,
-  "kind": "mute_switch",
-  "value": true
-}
-```
-
-### 5. FaceIdentified Event (`bmo/vision/events`)
+### 3. FaceIdentified Event (`bmo/vision/events`)
 ```json
 {
   "v": 1,
@@ -79,7 +58,7 @@ All contract payloads are validated using Pydantic v2 with strict schema enforce
 }
 ```
 
-### 6. PersonDetected Event (`bmo/vision/events`)
+### 4. PersonDetected Event (`bmo/vision/events`)
 ```json
 {
   "v": 1,
@@ -94,7 +73,7 @@ All contract payloads are validated using Pydantic v2 with strict schema enforce
 }
 ```
 
-### 7. PersonLeft Event (`bmo/vision/events`)
+### 5. PersonLeft Event (`bmo/vision/events`)
 ```json
 {
   "v": 1,
@@ -107,7 +86,7 @@ All contract payloads are validated using Pydantic v2 with strict schema enforce
 }
 ```
 
-### 8. ObjectSeen Event (`bmo/vision/events`)
+### 6. ObjectSeen Event (`bmo/vision/events`)
 ```json
 {
   "v": 1,
@@ -121,7 +100,7 @@ All contract payloads are validated using Pydantic v2 with strict schema enforce
 }
 ```
 
-### 9. Scene Context (`bmo/vision/context`)
+### 7. Scene Context (`bmo/vision/context`)
 ```json
 {
   "ts": 1700000006.789,
@@ -142,7 +121,7 @@ All contract payloads are validated using Pydantic v2 with strict schema enforce
 }
 ```
 
-### 10. VisionCmd (`bmo/vision/cmd`)
+### 8. VisionCmd (`bmo/vision/cmd`)
 ```json
 {
   "id": "cmd-001",
@@ -151,7 +130,7 @@ All contract payloads are validated using Pydantic v2 with strict schema enforce
 }
 ```
 
-### 11. VisionCmdResult (`bmo/vision/cmd_result`)
+### 9. VisionCmdResult (`bmo/vision/cmd_result`)
 ```json
 {
   "id": "cmd-001",
@@ -160,23 +139,11 @@ All contract payloads are validated using Pydantic v2 with strict schema enforce
 }
 ```
 
-### 12. BrainSay (`bmo/brain/say`)
+### 10. BrainSay (`bmo/brain/say`)
 ```json
 {
   "utt_id": "utt-001",
   "text": "Hello there! How can I help you today?",
   "emotion": "happy"
-}
-```
-
-### 13. HwCmd (`bmo/hw/cmd`)
-```json
-{
-  "id": "hw-001",
-  "target": "pi",
-  "action": "set_expression",
-  "args": {
-    "expression": "happy"
-  }
 }
 ```

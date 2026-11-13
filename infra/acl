@@ -9,24 +9,12 @@ topic read bmo/vision/cmd
 user brain
 topic write bmo/brain/say
 topic write bmo/brain/status
-topic write bmo/hw/cmd
 topic write bmo/vision/cmd
-topic read bmo/hw/event
-topic read bmo/hw/status
 topic read bmo/vision/cmd_result
 topic read bmo/vision/context
 topic read bmo/vision/events
 topic read bmo/vision/status
 
 user pi
-topic write bmo/hw/event
-topic write bmo/hw/status
-topic read bmo/brain/say
-topic read bmo/brain/status
-topic read bmo/hw/cmd
-topic read bmo/vision/status
 
 user esp32
-topic write bmo/hw/event
-topic write bmo/hw/status
-topic read bmo/hw/cmd

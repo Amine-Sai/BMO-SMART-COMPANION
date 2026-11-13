@@ -61,6 +61,25 @@ def extract_memories(text: str) -> list[tuple[str, str, str]]:
         if value:
             found.append(("work", value, "fact"))
 
+    # People: "this is [name]" or "meet [name]" or "remember [name]"
+    m = re.search(r"\b(?:this is|meet|remember)\s+([A-Z][a-z]+)(?:\s+.+?)(?:[.!?]|$)", t)
+    if m:
+        name = _clean(m.group(1))
+        if name and name.lower() not in {"i", "you", "we", "they", "he", "she", "it"}:
+            # Extract the rest as details
+            rest = t[m.end():].strip(" ,.!?")
+            detail = _clean(rest) if rest else f"Met {name}"
+            found.append((f"person {name}", detail, "person"))
+
+    # Objects: "this is a [object]" or "remember this [object]"
+    m = re.search(r"\b(?:this is (?:a|an)|remember (?:this|that))\s+([a-z]+)(?:\s+.+?)(?:[.!?]|$)", t, re.IGNORECASE)
+    if m:
+        obj = _clean(m.group(1))
+        if obj and obj.lower() not in {"i", "you", "we", "they", "he", "she", "it", "person", "name"}:
+            rest = t[m.end():].strip(" ,.!?")
+            detail = _clean(rest) if rest else f"Learned about {obj}"
+            found.append((f"object {obj}", detail, "object"))
+
     # Generic "remember that ..." / "don't forget ..." only when no more
     # specific pattern already captured the statement.
     if not found:
@@ -105,6 +124,11 @@ def apply_memory_effects(text: str, memory: "LongTermMemory") -> list[str]:
     if forget_key and memory.forget(forget_key):
         notes.append(f"forgot {forget_key}")
     for key, value, category in extract_memories(text):
-        memory.remember(key, value, category=category)
+        if category == "person":
+            memory.remember_person(key.replace("person ", ""), value)
+        elif category == "object":
+            memory.remember_object(key.replace("object ", ""), value)
+        else:
+            memory.remember(key, value, category=category)
         notes.append(f"remembered {key}")
     return notes
