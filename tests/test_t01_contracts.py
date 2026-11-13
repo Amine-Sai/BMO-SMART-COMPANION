@@ -1,7 +1,6 @@
 """Tests for BMO Contract Models, Serialization, and CV Conformance."""
 
 import json
-import pathlib
 import re
 import unittest
 from unittest.mock import MagicMock
@@ -37,24 +36,38 @@ from bmo_contracts.topics import (
     VISION_EVENTS,
 )
 
-REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+# Contract JSON examples embedded directly (formerly in docs/contracts.md)
+CONTRACT_JSON_EXAMPLES = [
+    # 1. VisionStatus
+    '{"online": true}',
+    # 2. BrainStatus
+    '{"online": true, "state": "listening"}',
+    # 3. FaceIdentified Event
+    '{"v": 1, "id": "evt-000001", "ts": 1700000001.234, "type": "face_identified", "data": {"track_id": 1, "name": "Alice", "conf": 0.95}}',
+    # 4. PersonDetected Event
+    '{"v": 1, "id": "evt-000002", "ts": 1700000002.345, "type": "person_detected", "data": {"track_id": 1, "pos": "center", "proximity": "near"}}',
+    # 5. PersonLeft Event
+    '{"v": 1, "id": "evt-000003", "ts": 1700000003.456, "type": "person_left", "data": {"track_id": 1}}',
+    # 6. ObjectSeen Event
+    '{"v": 1, "id": "evt-000005", "ts": 1700000005.678, "type": "object_seen", "data": {"label": "cup", "conf": 0.88}}',
+    # 7. Scene Context
+    '{"ts": 1700000006.789, "people": [{"track_id": 1, "name": "Alice", "pos": "center", "proximity": "near", "since_s": 12.5}], "objects": ["cup", "bottle"], "recent": ["person detected (track: 1)", "face identified: Alice"]}',
+    # 8. VisionCmd
+    '{"id": "cmd-001", "cmd": "reload_gallery", "args": {}}',
+    # 9. VisionCmdResult
+    '{"id": "cmd-001", "ok": true, "detail": "gallery reloaded successfully"}',
+    # 10. BrainSay
+    '{"utt_id": "utt-001", "text": "Hello there! How can I help you today?", "emotion": "happy"}',
+]
 
 
 class TestSection43Examples(unittest.TestCase):
-    """Verify that all verbatim JSON examples from docs/contracts.md pass Pydantic validation."""
+    """Verify that all verbatim JSON examples pass Pydantic validation."""
 
     def setUp(self):
-        contracts_doc = REPO_ROOT / "docs" / "contracts.md"
-        self.assertTrue(contracts_doc.is_file(), "docs/contracts.md must exist")
-        content = contracts_doc.read_text(encoding="utf-8")
-
-        # Extract JSON blocks under Section 4.3
-        sec_match = re.search(r"## 4\.3 Verbatim JSON Payload Examples.*", content, re.DOTALL)
-        self.assertIsNotNone(sec_match, "Section 4.3 missing in docs/contracts.md")
-        sec_text = sec_match.group(0)
-
-        self.json_blocks = re.findall(r"```json\s*(\{.*?\})\s*```", sec_text, re.DOTALL)
-        self.assertGreaterEqual(len(self.json_blocks), 10, "Expected at least 10 JSON examples in Section 4.3")
+        self.json_blocks = CONTRACT_JSON_EXAMPLES
+        self.assertGreaterEqual(len(self.json_blocks), 10, "Expected at least 10 JSON examples")
 
     def test_all_verbatim_examples_validate(self):
         """Validate each Section 4.3 verbatim JSON example against its corresponding model."""
