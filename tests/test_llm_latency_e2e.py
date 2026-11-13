@@ -70,7 +70,7 @@ def test_real_backend_text_turn_within_budget() -> None:
     builder = PromptBuilder(
         SceneCache(settings=SceneSettings()),
         max_turns=settings.history_turns,
-        max_total_tokens=settings.history_max_tokens,
+        max_total_tokens=1500,
     )
     turn, sm, tts = _manager(llm, builder)
 
@@ -96,7 +96,7 @@ def test_second_concurrent_start_text_turn_is_dropped(caplog: Any) -> None:
     builder = PromptBuilder(
         SceneCache(settings=SceneSettings()),
         max_turns=settings.history_turns,
-        max_total_tokens=settings.history_max_tokens,
+        max_total_tokens=1500,
     )
     turn, _, tts = _manager(LLMClient(settings=settings, backend=backend), builder)
 

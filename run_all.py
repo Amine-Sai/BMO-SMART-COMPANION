@@ -692,7 +692,19 @@ def run_brain_voice(scene_cache) -> None:
                             state_machine.transition(BrainState.LISTENING)
                     except Exception:
                         pass
-                    turn_manager.run_text_turn(command, followup=in_followup)
+                    try:
+                        reply = turn_manager.run_text_turn(command, followup=in_followup)
+                        if not reply and state_machine.state == BrainState.LISTENING:
+                            try:
+                                state_machine.transition(BrainState.IDLE)
+                            except Exception:
+                                pass
+                    finally:
+                        if state_machine.state == BrainState.LISTENING:
+                            try:
+                                state_machine.transition(BrainState.IDLE)
+                            except Exception:
+                                pass
                 else:
                     # Bare wake word: answer immediately, then listen for the
                     # actual request inside the follow-up window.
@@ -700,6 +712,11 @@ def run_brain_voice(scene_cache) -> None:
                 followup_until = time.monotonic() + followup_s
             except Exception as exc:
                 logger.error("Turn failed: %s", exc, exc_info=True)
+                if state_machine.state in (BrainState.LISTENING, BrainState.THINKING, BrainState.SPEAKING):
+                    try:
+                        state_machine.transition(BrainState.IDLE)
+                    except Exception:
+                        pass
 
         if turn_manager._active_thread and turn_manager._active_thread.is_alive():
             turn_manager._active_thread.join(timeout=30.0)
@@ -745,6 +762,8 @@ def run_text_input(turn_manager) -> None:
     state_machine = turn_manager._state_machine
     publisher = turn_manager._publish_fn
 
+    global _tts_quiet_until
+
     def _safe_transition(target: BrainState) -> None:
         try:
             state_machine.transition(target)
@@ -769,107 +788,115 @@ def run_text_input(turn_manager) -> None:
             break
 
         try:
-            memory = getattr(turn_manager._prompt_builder, "memory", None)
-            if memory is not None:
+            with turn_manager._turn_gate:
                 try:
-                    for note in apply_memory_effects(text, memory):
-                        logger.info("memory: %s", note)
-                except Exception as exc:
-                    logger.warning("memory update failed: %s", exc)
+                    memory = getattr(turn_manager._prompt_builder, "memory", None)
+                    if memory is not None:
+                        try:
+                            for note in apply_memory_effects(text, memory):
+                                logger.info("memory: %s", note)
+                        except Exception as exc:
+                            logger.warning("memory update failed: %s", exc)
 
-            # Ask CV for a fresh look before answering camera questions,
-            # enabling only the models relevant to the question. Typed
-            # follow-ups ("is it red?") reuse the previous scene target too.
-            target = resolve_vision_target(
-                text,
-                followup=True,
-                last_target=last_vision_target,
-                last_at=last_vision_at,
-                now=time.monotonic(),
-            )
-            if target:
-                last_vision_target = target
-                last_vision_at = time.monotonic()
-            if target and turn_manager._vision_request_fn is not None:
-                try:
-                    turn_manager._vision_request_fn(target)
-                except Exception as exc:
-                    logger.warning("Vision request failed: %s", exc)
+                    # Ask CV for a fresh look before answering camera questions,
+                    # enabling only the models relevant to the question. Typed
+                    # follow-ups ("is it red?") reuse the previous scene target too.
+                    target = resolve_vision_target(
+                        text,
+                        followup=True,
+                        last_target=last_vision_target,
+                        last_at=last_vision_at,
+                        now=time.monotonic(),
+                    )
+                    if target:
+                        last_vision_target = target
+                        last_vision_at = time.monotonic()
+                    if target and turn_manager._vision_request_fn is not None:
+                        try:
+                            turn_manager._vision_request_fn(target)
+                        except Exception as exc:
+                            logger.warning("Vision request failed: %s", exc)
 
-            # Stream LLM response immediately for text mode, stripping every
-            # [emotion] tag (the model sometimes emits one per sentence).
-            _safe_transition(BrainState.THINKING)
-            print("bmo: ", end="", flush=True, file=stdout)
-            full_reply = []
-            tag_filter = EmotionTagStreamFilter()
-            printed_any = False
+                    # Stream LLM response immediately for text mode, stripping every
+                    # [emotion] tag (the model sometimes emits one per sentence).
+                    _safe_transition(BrainState.THINKING)
+                    print("bmo: ", end="", flush=True, file=stdout)
+                    full_reply = []
+                    tag_filter = EmotionTagStreamFilter()
+                    printed_any = False
 
-            def _emit(piece: str) -> None:
-                nonlocal printed_any
-                if not printed_any:
-                    piece = piece.lstrip()
-                if piece:
-                    print(piece, end="", flush=True, file=stdout)
-                    printed_any = True
+                    def _emit(piece: str) -> None:
+                        nonlocal printed_any
+                        if not printed_any:
+                            piece = piece.lstrip()
+                        if piece:
+                            print(piece, end="", flush=True, file=stdout)
+                            printed_any = True
 
-            for chunk in turn_manager._llm.chat(
-                turn_manager._prompt_builder.build_messages(text, scene_target=target),
-                tools=(
-                    turn_manager._tools.ollama_tools()
-                    if needs_tools(text)
-                    else None
-                ),
-                stream=True,
-                cancel_event=turn_manager.cancel_event,
-            ):
-                if not chunk.text:
-                    continue
-                full_reply.append(chunk.text)
-                _emit(tag_filter.feed(chunk.text))
-            _emit(tag_filter.flush())
-            print(flush=True, file=stdout)
+                    for chunk in turn_manager._llm.chat(
+                        turn_manager._prompt_builder.build_messages(text, scene_target=target),
+                        tools=(
+                            turn_manager._tools.ollama_tools()
+                            if needs_tools(text)
+                            else None
+                        ),
+                        stream=True,
+                        cancel_event=turn_manager.cancel_event,
+                    ):
+                        if chunk.tool_call is not None:
+                            try:
+                                turn_manager._tools.dispatch(chunk.tool_call, confirmed=False)
+                            except Exception as tool_exc:
+                                logger.error("Tool dispatch failed: %s", tool_exc)
+                        if not chunk.text:
+                            continue
+                        full_reply.append(chunk.text)
+                        _emit(tag_filter.feed(chunk.text))
+                    _emit(tag_filter.flush())
+                    print(flush=True, file=stdout)
 
-            raw_reply = "".join(full_reply)
-            reply_text = strip_emotion_tags(raw_reply)
-            emotion, _ = split_emotion_tag(raw_reply)
-            emotion = emotion or Emotion.NEUTRAL
+                    raw_reply = "".join(full_reply)
+                    reply_text = strip_emotion_tags(raw_reply)
+                    emotion, _ = split_emotion_tag(raw_reply)
+                    emotion = emotion or Emotion.NEUTRAL
 
-            # Optionally speak the response via TTS
-            if use_tts and tts is not None and sink is not None and reply_text.strip():
-                _safe_transition(BrainState.SPEAKING)
-                if publisher is not None:
-                    try:
-                        say = BrainSay(
-                            utt_id=uuid.uuid4().hex[:8],
-                            text=reply_text,
-                            emotion=emotion,
-                        )
-                        publisher(
-                            BRAIN_SAY,
-                            say.model_dump_json().encode("utf-8"),
-                            1,
-                            False,
-                        )
-                    except Exception as publish_exc:
-                        logger.warning("BrainSay publish failed: %s", publish_exc)
-                logger.info("Text input TTS: speaking reply (%d chars)", len(reply_text))
-                global _tts_quiet_until
-                _tts_active.set()
-                try:
-                    tts.speak_sentence(reply_text, sink)
-                    # Wait for audio to finish playing
-                    if hasattr(sink, 'drain'):
-                        sink.drain()
-                    logger.info("Text input TTS: completed")
-                except Exception as tts_exc:
-                    logger.error("TTS failed: %s", tts_exc, exc_info=True)
+                    # Optionally speak the response via TTS
+                    if use_tts and tts is not None and sink is not None and reply_text.strip():
+                        _safe_transition(BrainState.SPEAKING)
+                        if publisher is not None:
+                            try:
+                                say = BrainSay(
+                                    utt_id=uuid.uuid4().hex[:8],
+                                    text=reply_text,
+                                    emotion=emotion,
+                                )
+                                publisher(
+                                    BRAIN_SAY,
+                                    say.model_dump_json().encode("utf-8"),
+                                    1,
+                                    False,
+                                )
+                            except Exception as publish_exc:
+                                logger.warning("BrainSay publish failed: %s", publish_exc)
+                        logger.info("Text input TTS: speaking reply (%d chars)", len(reply_text))
+                        _tts_active.set()
+                        try:
+                            tts.speak_sentence(reply_text, sink)
+                            # Wait for audio to finish playing
+                            if hasattr(sink, 'drain'):
+                                sink.drain()
+                            logger.info("Text input TTS: completed")
+                        except Exception as tts_exc:
+                            logger.error("TTS failed: %s", tts_exc, exc_info=True)
+                        finally:
+                            _tts_active.clear()
+                            _tts_quiet_until = time.monotonic() + 0.8
+
+                    # Record turn in history
+                    turn_manager._prompt_builder.record_turn(text, reply_text)
                 finally:
-                    _tts_active.clear()
-                    _tts_quiet_until = time.monotonic() + 0.8
-            _safe_transition(BrainState.IDLE)
-            
-            # Record turn in history
-            turn_manager._prompt_builder.record_turn(text, reply_text)
+                    if state_machine.state in (BrainState.THINKING, BrainState.SPEAKING):
+                        _safe_transition(BrainState.IDLE)
         except Exception as exc:
             logger.error("Text input turn failed: %s", exc)
 
