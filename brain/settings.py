@@ -20,6 +20,7 @@ class LLMSettings(BaseModel):
     keep_alive: str = "5m"
     timeout_s: float = 30.0
     temperature: float = 0.7
+    max_tokens: int = 512
     history_turns: int = 3
     history_max_tokens: int = 250
     # llamacpp optimization settings

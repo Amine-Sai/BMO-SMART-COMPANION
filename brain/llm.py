@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import gc
+import inspect
 import json
 import logging
 import threading
@@ -52,6 +54,110 @@ class LLMBackend(Protocol):
     def prewarm(self) -> None: ...
 
 
+class ThinkFilter:
+    """Filters out <think>...</think> blocks from a stream of text chunks."""
+
+    OPEN_TAG = "<think>"
+    CLOSE_TAG = "</think>"
+
+    def __init__(self) -> None:
+        self._in_think = False
+        self._buf = ""
+
+    def process(self, chunk: str) -> str:
+        if not chunk:
+            return ""
+        self._buf += chunk
+        out: list[str] = []
+        while self._buf:
+            if not self._in_think:
+                idx = self._buf.find(self.OPEN_TAG)
+                if idx != -1:
+                    if idx > 0:
+                        out.append(self._buf[:idx])
+                    self._buf = self._buf[idx + len(self.OPEN_TAG):]
+                    self._in_think = True
+                else:
+                    matched_len = 0
+                    max_check = min(len(self.OPEN_TAG) - 1, len(self._buf))
+                    for l in range(max_check, 0, -1):
+                        if self.OPEN_TAG.startswith(self._buf[-l:]):
+                            matched_len = l
+                            break
+                    if matched_len > 0:
+                        if len(self._buf) > matched_len:
+                            out.append(self._buf[:-matched_len])
+                            self._buf = self._buf[-matched_len:]
+                        break
+                    else:
+                        out.append(self._buf)
+                        self._buf = ""
+                        break
+            else:
+                idx = self._buf.find(self.CLOSE_TAG)
+                if idx != -1:
+                    self._buf = self._buf[idx + len(self.CLOSE_TAG):]
+                    self._in_think = False
+                else:
+                    matched_len = 0
+                    max_check = min(len(self.CLOSE_TAG) - 1, len(self._buf))
+                    for l in range(max_check, 0, -1):
+                        if self.CLOSE_TAG.startswith(self._buf[-l:]):
+                            matched_len = l
+                            break
+                    if matched_len > 0:
+                        self._buf = self._buf[-matched_len:]
+                        break
+                    else:
+                        self._buf = ""
+                        break
+        return "".join(out)
+
+    def flush(self) -> str:
+        if self._in_think:
+            self._buf = ""
+            return ""
+        res = self._buf
+        self._buf = ""
+        return res
+
+
+def strip_thinking(text: str) -> str:
+    tf = ThinkFilter()
+    return tf.process(text) + tf.flush()
+
+
+def _parse_single_tool_call(tc: dict[str, Any]) -> ToolCall | None:
+    if not isinstance(tc, dict):
+        return None
+    fn = tc.get("function")
+    if not isinstance(fn, dict):
+        return None
+    name = fn.get("name", "")
+    raw = fn.get("arguments", {})
+    error: str | None = None
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                args = parsed
+            else:
+                error = f"Malformed tool arguments (expected JSON object, got {type(parsed).__name__}): {raw[:200]!r}"
+                logger.warning(error)
+                args = {"error": error}
+        except (json.JSONDecodeError, ValueError) as exc:
+            error = f"Malformed tool arguments JSON: {raw[:200]!r} ({exc})"
+            logger.warning(error)
+            args = {"error": error}
+    elif isinstance(raw, dict):
+        args = raw
+    else:
+        error = f"Malformed tool arguments type (expected str or dict, got {type(raw).__name__}): {raw!r}"
+        logger.warning(error)
+        args = {"error": error}
+    return ToolCall(name=name, arguments=args, error=error)
+
+
 def _parse_chunk(data: dict[str, Any]) -> Iterator[ChatChunk]:
     if not isinstance(data, dict):
         logger.warning("Malformed chunk data (expected dict, got %s): %r", type(data).__name__, data)
@@ -63,38 +169,37 @@ def _parse_chunk(data: dict[str, Any]) -> Iterator[ChatChunk]:
     content = msg.get("content", "") or ""
     raw_calls = msg.get("tool_calls") or []
     calls = raw_calls if isinstance(raw_calls, list) else []
-    for tc in calls:
-        if not isinstance(tc, dict):
-            continue
-        fn = tc.get("function")
-        if not isinstance(fn, dict):
-            continue
-        name = fn.get("name", "")
-        raw = fn.get("arguments", {})
-        error: str | None = None
-        if isinstance(raw, str):
-            try:
-                parsed = json.loads(raw)
-                if isinstance(parsed, dict):
-                    args = parsed
-                else:
-                    error = f"Malformed tool arguments (expected JSON object, got {type(parsed).__name__}): {raw[:200]!r}"
-                    logger.warning(error)
-                    args = {"error": error}
-            except (json.JSONDecodeError, ValueError) as exc:
-                error = f"Malformed tool arguments JSON: {raw[:200]!r} ({exc})"
-                logger.warning(error)
-                args = {"error": error}
-        elif isinstance(raw, dict):
-            args = raw
-        else:
-            error = f"Malformed tool arguments type (expected str or dict, got {type(raw).__name__}): {raw!r}"
-            logger.warning(error)
-            args = {"error": error}
-        yield ChatChunk(content, ToolCall(name, args, error=error), done)
-        content = ""
-    if content or (done and not calls):
+    emitted_tc = False
+    for raw_tc in calls:
+        tc = _parse_single_tool_call(raw_tc)
+        if tc is not None:
+            yield ChatChunk(content, tc, done)
+            content = ""
+            emitted_tc = True
+    if content or (done and not emitted_tc):
         yield ChatChunk(content, done=done)
+
+
+def _supports_chat_template_kwargs(fn: Any) -> bool:
+    try:
+        sig = inspect.signature(fn)
+        return (
+            "chat_template_kwargs" in sig.parameters
+            or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+        )
+    except (ValueError, TypeError):
+        return False
+
+
+def _call_create_chat_completion(llm: Any, kwargs: dict[str, Any]) -> Any:
+    try:
+        return llm.create_chat_completion(**kwargs)
+    except TypeError as exc:
+        if "chat_template_kwargs" in str(exc) and "chat_template_kwargs" in kwargs:
+            kwargs_copy = dict(kwargs)
+            kwargs_copy.pop("chat_template_kwargs", None)
+            return llm.create_chat_completion(**kwargs_copy)
+        raise
 
 
 class OllamaBackend:
@@ -116,6 +221,7 @@ class OllamaBackend:
         cancel_event: CancelEvt = None,
     ) -> Iterator[ChatChunk]:
         if cancel_event and cancel_event.is_set():
+            yield ChatChunk(done=True)
             return
         s = self._s
         p: dict[str, Any] = {
@@ -134,12 +240,18 @@ class OllamaBackend:
             except (json.JSONDecodeError, ValueError) as exc:
                 logger.warning("Malformed JSON in non-stream response: %s", exc)
                 return
+            if cancel_event and cancel_event.is_set():
+                yield ChatChunk(done=True)
+                return
             yield from _parse_chunk(data)
             return
         try:
             with self._client.stream("POST", "/api/chat", json=p) as resp:
                 resp.raise_for_status()
                 for line in resp.iter_lines():
+                    if cancel_event and cancel_event.is_set():
+                        yield ChatChunk(done=True)
+                        return
                     if not line:
                         continue
                     try:
@@ -153,6 +265,7 @@ class OllamaBackend:
                         continue
                     for c in _parse_chunk(data):
                         if cancel_event and cancel_event.is_set():
+                            yield ChatChunk(done=True)
                             return
                         yield c
         except httpx.TimeoutException as exc:
@@ -257,49 +370,104 @@ class LlamaCppBackend:
         cancel_event: CancelEvt = None,
     ) -> Iterator[ChatChunk]:
         if cancel_event and cancel_event.is_set():
+            yield ChatChunk(done=True)
             return
-        # measure end-to-end latency: cold calls include model load in TTFT
+
+        start_time = time.monotonic()
         started = time.perf_counter()
+        if time.monotonic() - start_time > self._s.timeout_s:
+            raise TimeoutError("Inference timed out")
+
         llm = self._load()
+        if time.monotonic() - start_time > self._s.timeout_s:
+            raise TimeoutError("Inference timed out")
+        if cancel_event and cancel_event.is_set():
+            yield ChatChunk(done=True)
+            return
 
         # Use proper chat format for Qwen models
         prompt = self._messages_to_chat_format(messages, tools)
+        kwargs: dict[str, Any] = {
+            "messages": prompt,
+            "max_tokens": self._s.max_tokens,
+            "temperature": self._s.temperature,
+            "repeat_penalty": 1.15,
+            "stop": ["User:", "System:", "Assistant:"],
+            "stream": stream,
+        }
+        if _supports_chat_template_kwargs(llm.create_chat_completion):
+            kwargs["chat_template_kwargs"] = {"enable_thinking": False}
+
+        think_filter = ThinkFilter()
         first_token_at: float | None = None
         tokens = 0
 
         try:
             if stream:
-                for chunk in llm.create_chat_completion(
-                    messages=prompt,
-                    max_tokens=256,
-                    temperature=self._s.temperature,
-                    repeat_penalty=1.15,
-                    stop=["User:", "System:", "Assistant:"],
-                    stream=True,
-                ):
-                    if cancel_event and cancel_event.is_set():
-                        return
-                    delta = chunk.get("choices", [{}])[0].get("delta", {})
-                    text = delta.get("content", "")
-                    if text:
-                        if first_token_at is None:
-                            first_token_at = time.perf_counter()
-                        tokens += count_tokens(text)
-                        yield ChatChunk(text=text)
+                gen = _call_create_chat_completion(llm, kwargs)
+                try:
+                    for chunk in gen:
+                        if time.monotonic() - start_time > self._s.timeout_s:
+                            raise TimeoutError("Inference timed out")
+                        if cancel_event and cancel_event.is_set():
+                            yield ChatChunk(done=True)
+                            return
+                        delta = chunk.get("choices", [{}])[0].get("delta", {})
+                        raw_content = delta.get("content", "") or ""
+                        filtered_text = think_filter.process(raw_content)
+                        if filtered_text:
+                            if first_token_at is None:
+                                first_token_at = time.perf_counter()
+                            tokens += count_tokens(filtered_text)
+                            yield ChatChunk(text=filtered_text)
+                        raw_calls = delta.get("tool_calls")
+                        if isinstance(raw_calls, list):
+                            for raw_tc in raw_calls:
+                                tc = _parse_single_tool_call(raw_tc)
+                                if tc is not None:
+                                    yield ChatChunk(tool_call=tc)
+                finally:
+                    close_fn = getattr(gen, "close", None)
+                    if callable(close_fn):
+                        close_fn()
+
+                if cancel_event and cancel_event.is_set():
+                    yield ChatChunk(done=True)
+                    return
+
+                remaining = think_filter.flush()
+                if remaining:
+                    if first_token_at is None:
+                        first_token_at = time.perf_counter()
+                    tokens += count_tokens(remaining)
+                    yield ChatChunk(text=remaining)
                 self._log_chat_timings(started, first_token_at, tokens)
                 yield ChatChunk(done=True)
             else:
-                result = llm.create_chat_completion(
-                    messages=prompt,
-                    max_tokens=256,
-                    temperature=self._s.temperature,
-                    repeat_penalty=1.15,
-                    stop=["User:", "System:", "Assistant:"],
-                    stream=False,
-                )
-                text = result.get("choices", [{}])[0].get("message", {}).get("content", "")
-                self._log_chat_timings(started, None, count_tokens(text))
-                yield ChatChunk(text=text, done=True)
+                result = _call_create_chat_completion(llm, kwargs)
+                if time.monotonic() - start_time > self._s.timeout_s:
+                    raise TimeoutError("Inference timed out")
+                if cancel_event and cancel_event.is_set():
+                    yield ChatChunk(done=True)
+                    return
+                msg = result.get("choices", [{}])[0].get("message", {})
+                raw_content = msg.get("content", "") or ""
+                text = strip_thinking(raw_content)
+                raw_calls = msg.get("tool_calls")
+                calls = raw_calls if isinstance(raw_calls, list) else []
+                emitted_tc = False
+                for i, raw_tc in enumerate(calls):
+                    tc = _parse_single_tool_call(raw_tc)
+                    if tc is not None:
+                        is_last = (i == len(calls) - 1)
+                        yield ChatChunk(text=text, tool_call=tc, done=is_last)
+                        text = ""
+                        emitted_tc = True
+                if text or (not emitted_tc):
+                    yield ChatChunk(text=text, done=True)
+                self._log_chat_timings(started, None, count_tokens(raw_content))
+        except TimeoutError:
+            raise
         except Exception as exc:
             logger.error("llama-cpp inference error: %s", exc)
             yield ChatChunk(text=f"[LLM error: {exc}]", done=True)
@@ -339,10 +507,20 @@ class LlamaCppBackend:
         return self._messages_to_chat_format(messages, tools)
 
     def unload(self) -> None:
-        self._llm = None
+        with self._decode_lock:
+            if self._llm is not None:
+                close_fn = getattr(self._llm, "close", None)
+                if callable(close_fn):
+                    try:
+                        close_fn()
+                    except Exception as exc:
+                        logger.warning("Error closing llama-cpp model: %s", exc)
+                self._llm = None
+                gc.collect()
 
     def prewarm(self) -> None:
-        self._load()
+        with self._decode_lock:
+            self._load()
 
 
 class FakeLLMBackend:

@@ -13,9 +13,12 @@ from brain.llm import (
     ChatChunk,
     FakeLLMBackend,
     LLMClient,
+    LlamaCppBackend,
     OllamaBackend,
+    ThinkFilter,
     ToolCall,
     count_tokens,
+    strip_thinking,
 )
 from brain.settings import LLMSettings, Settings, load_settings
 
@@ -41,6 +44,7 @@ def test_load_settings_loads_llm_yaml() -> None:
     assert settings.llm.keep_alive == "5m"
     assert settings.llm.timeout_s == 30.0
     assert settings.llm.temperature == 0.7
+    assert settings.llm.max_tokens == 512
     assert settings.llm.n_gpu_layers == -1
     assert settings.llm.use_flash_attn is False
     assert settings.llm.n_threads == 8
@@ -491,3 +495,323 @@ def test_parse_chunk_non_dict_tool_args_logged(caplog: pytest.LogCaptureFixture)
     assert chunks[0].tool_call.error is not None
     assert "expected JSON object" in chunks[0].tool_call.error
     assert any("Malformed tool arguments" in r.message for r in caplog.records if r.levelname == "WARNING")
+
+
+def test_think_filter_and_strip_thinking_units() -> None:
+    assert strip_thinking("") == ""
+    assert strip_thinking("Hello world!") == "Hello world!"
+    assert strip_thinking("<think>Internal monologue</think>Visible text") == "Visible text"
+    assert strip_thinking("<think>\nstep 1\nstep 2\n</think>Answer") == "Answer"
+    assert strip_thinking("Prefix <think>hide</think> middle <think>hide</think> suffix") == "Prefix  middle  suffix"
+    assert strip_thinking("<think>unclosed thought") == ""
+    assert strip_thinking("x < 5 and y > 3") == "x < 5 and y > 3"
+
+    tf = ThinkFilter()
+    emitted = []
+    out = tf.process("<th")
+    if out:
+        emitted.append(out)
+    out = tf.process("ink>hidden</think>Visible")
+    if out:
+        emitted.append(out)
+    out = tf.flush()
+    if out:
+        emitted.append(out)
+    assert "".join(emitted) == "Visible"
+
+    tf2 = ThinkFilter()
+    emitted2 = []
+    out = tf2.process("<think>hidden</th")
+    if out:
+        emitted2.append(out)
+    out = tf2.process("ink>Done")
+    if out:
+        emitted2.append(out)
+    out = tf2.flush()
+    if out:
+        emitted2.append(out)
+    assert "".join(emitted2) == "Done"
+
+    tf3 = ThinkFilter()
+    emitted3 = []
+    out = tf3.process("Value: <")
+    if out:
+        emitted3.append(out)
+    out = tf3.process("tag> continues")
+    if out:
+        emitted3.append(out)
+    out = tf3.flush()
+    if out:
+        emitted3.append(out)
+    assert "".join(emitted3) == "Value: <tag> continues"
+
+
+def test_llamacpp_backend_thinking_filtered_streaming() -> None:
+    settings = LLMSettings(backend="llamacpp", host="/test/model.gguf")
+    backend = LlamaCppBackend(settings)
+
+    class MockLlama:
+        def create_chat_completion(self, **kwargs: Any) -> Any:
+            assert kwargs.get("stream") is True
+            yield {"choices": [{"delta": {"content": "<th"}}]}
+            yield {"choices": [{"delta": {"content": "ink>I should say hello.</th"}}]}
+            yield {"choices": [{"delta": {"content": "ink>Hello "}}]}
+            yield {"choices": [{"delta": {"content": "world!"}}]}
+
+    backend._llm = MockLlama()  # type: ignore[assignment]
+    backend._load = lambda: backend._llm  # type: ignore[assignment]
+
+    chunks = list(backend.chat([{"role": "user", "content": "hi"}], stream=True))
+    texts = [c.text for c in chunks if c.text]
+    assert texts == ["Hello ", "world!"]
+    assert chunks[-1].done is True
+
+
+def test_llamacpp_backend_thinking_filtered_non_streaming() -> None:
+    settings = LLMSettings(backend="llamacpp", host="/test/model.gguf")
+    backend = LlamaCppBackend(settings)
+
+    class MockLlama:
+        def create_chat_completion(self, **kwargs: Any) -> Any:
+            assert kwargs.get("stream") is False
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "<think>private calculation</think>The answer is 42.",
+                        }
+                    }
+                ]
+            }
+
+    backend._llm = MockLlama()  # type: ignore[assignment]
+    backend._load = lambda: backend._llm  # type: ignore[assignment]
+
+    chunks = list(backend.chat([{"role": "user", "content": "question"}], stream=False))
+    assert len(chunks) == 1
+    assert chunks[0].text == "The answer is 42."
+    assert chunks[0].done is True
+
+
+def test_llamacpp_backend_max_tokens_and_chat_template_kwargs() -> None:
+    settings = LLMSettings(backend="llamacpp", host="/test/model.gguf", max_tokens=1024)
+    backend = LlamaCppBackend(settings)
+    captured_kwargs: dict[str, Any] = {}
+
+    class MockLlamaSupportingKwargs:
+        def create_chat_completion(self, **kwargs: Any) -> Any:
+            captured_kwargs.update(kwargs)
+            return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+
+    backend._llm = MockLlamaSupportingKwargs()  # type: ignore[assignment]
+    backend._load = lambda: backend._llm  # type: ignore[assignment]
+
+    list(backend.chat([{"role": "user", "content": "test"}], stream=False))
+    assert captured_kwargs["max_tokens"] == 1024
+    assert captured_kwargs.get("chat_template_kwargs") == {"enable_thinking": False}
+
+    captured_kwargs.clear()
+
+    class MockLlamaRejectingKwargs:
+        def create_chat_completion(
+            self,
+            messages: Any,
+            max_tokens: Any = None,
+            temperature: Any = None,
+            repeat_penalty: Any = None,
+            stop: Any = None,
+            stream: Any = False,
+        ) -> Any:
+            _ = (temperature, repeat_penalty, stop, stream)
+            captured_kwargs["messages"] = messages
+            captured_kwargs["max_tokens"] = max_tokens
+            return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+
+    backend._llm = MockLlamaRejectingKwargs()  # type: ignore[assignment]
+    list(backend.chat([{"role": "user", "content": "test"}], stream=False))
+    assert captured_kwargs["max_tokens"] == 1024
+    assert "chat_template_kwargs" not in captured_kwargs
+
+    class MockLlamaTypeErrorFallback:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def create_chat_completion(self, **kwargs: Any) -> Any:
+            self.calls += 1
+            if "chat_template_kwargs" in kwargs:
+                raise TypeError("create_chat_completion got unexpected keyword argument 'chat_template_kwargs'")
+            return {"choices": [{"message": {"role": "assistant", "content": "fallback_ok"}}]}
+
+    fb_mock = MockLlamaTypeErrorFallback()
+    backend._llm = fb_mock  # type: ignore[assignment]
+    chunks = list(backend.chat([{"role": "user", "content": "test"}], stream=False))
+    assert chunks[0].text == "fallback_ok"
+    assert fb_mock.calls == 2
+
+
+def test_llamacpp_backend_tool_calls_streaming_and_non_streaming() -> None:
+    settings = LLMSettings(backend="llamacpp", host="/test/model.gguf")
+    backend = LlamaCppBackend(settings)
+
+    class MockLlamaTools:
+        def create_chat_completion(self, **kwargs: Any) -> Any:
+            if kwargs.get("stream"):
+                def _gen():
+                    yield {
+                        "choices": [
+                            {
+                                "delta": {
+                                    "content": "calling ",
+                                    "tool_calls": [
+                                        {
+                                            "function": {
+                                                "name": "set_led",
+                                                "arguments": '{"color": "blue"}',
+                                            }
+                                        }
+                                    ],
+                                }
+                            }
+                        ]
+                    }
+                return _gen()
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "calling tool",
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "set_led",
+                                        "arguments": {"color": "green"},
+                                    }
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+
+    backend._llm = MockLlamaTools()  # type: ignore[assignment]
+    backend._load = lambda: backend._llm  # type: ignore[assignment]
+
+    stream_chunks = list(backend.chat([{"role": "user", "content": "led"}], stream=True))
+    assert any(c.text == "calling " for c in stream_chunks)
+    tc_stream = [c.tool_call for c in stream_chunks if c.tool_call is not None]
+    assert len(tc_stream) == 1
+    assert tc_stream[0].name == "set_led"
+    assert tc_stream[0].arguments == {"color": "blue"}
+    assert stream_chunks[-1].done is True
+
+    non_stream_chunks = list(backend.chat([{"role": "user", "content": "led"}], stream=False))
+    assert len(non_stream_chunks) == 1
+    assert non_stream_chunks[0].text == "calling tool"
+    assert non_stream_chunks[0].tool_call is not None
+    assert non_stream_chunks[0].tool_call.name == "set_led"
+    assert non_stream_chunks[0].tool_call.arguments == {"color": "green"}
+    assert non_stream_chunks[0].done is True
+
+
+def test_llamacpp_backend_timeout_enforcement() -> None:
+    settings = LLMSettings(backend="llamacpp", host="/test/model.gguf", timeout_s=0.02)
+    backend = LlamaCppBackend(settings)
+
+    class SlowMockLlama:
+        def create_chat_completion(self, **kwargs: Any) -> Any:
+            if kwargs.get("stream"):
+                def _gen():
+                    yield {"choices": [{"delta": {"content": "first"}}]}
+                    time.sleep(0.04)
+                    yield {"choices": [{"delta": {"content": "second"}}]}
+                return _gen()
+            time.sleep(0.04)
+            return {"choices": [{"message": {"role": "assistant", "content": "late"}}]}
+
+    backend._llm = SlowMockLlama()  # type: ignore[assignment]
+    backend._load = lambda: backend._llm  # type: ignore[assignment]
+
+    with pytest.raises(TimeoutError, match="timed out"):
+        list(backend.chat([{"role": "user", "content": "stream"}], stream=True))
+
+    with pytest.raises(TimeoutError, match="timed out"):
+        list(backend.chat([{"role": "user", "content": "non-stream"}], stream=False))
+
+
+def test_cancellation_yields_done_chunk_both_backends() -> None:
+    settings = make_test_settings()
+    cancel_evt = threading.Event()
+    cancel_evt.set()
+
+    ollama = OllamaBackend(settings)
+    chunks = list(ollama.chat([{"role": "user", "content": "hi"}], cancel_event=cancel_evt))
+    assert len(chunks) == 1
+    assert chunks[0].done is True
+
+    llama_settings = LLMSettings(backend="llamacpp", host="/test/model.gguf")
+    llamacpp = LlamaCppBackend(llama_settings)
+    chunks_llama = list(llamacpp.chat([{"role": "user", "content": "hi"}], cancel_event=cancel_evt))
+    assert len(chunks_llama) == 1
+    assert chunks_llama[0].done is True
+
+    cancel_mid = threading.Event()
+
+    class MidStreamCancelLlama:
+        def create_chat_completion(self, **kwargs: Any) -> Any:
+            yield {"choices": [{"delta": {"content": "c1"}}]}
+            cancel_mid.set()
+            yield {"choices": [{"delta": {"content": "c2"}}]}
+
+    llamacpp._llm = MidStreamCancelLlama()  # type: ignore[assignment]
+    llamacpp._load = lambda: llamacpp._llm  # type: ignore[assignment]
+
+    chunks_mid = list(llamacpp.chat([{"role": "user", "content": "hi"}], stream=True, cancel_event=cancel_mid))
+    assert any(c.text == "c1" for c in chunks_mid)
+    assert chunks_mid[-1].done is True
+
+
+def test_llamacpp_backend_unload_and_prewarm_synchronized(monkeypatch: pytest.MonkeyPatch) -> None:
+    import gc
+    from unittest.mock import MagicMock
+
+    settings = LLMSettings(backend="llamacpp", host="/test/model.gguf")
+    backend = LlamaCppBackend(settings)
+
+    mock_llm = MagicMock()
+    lock_held_during_close = False
+    lock_held_during_gc = False
+
+    def fake_close() -> None:
+        nonlocal lock_held_during_close
+        lock_held_during_close = backend._decode_lock.locked()
+
+    def fake_gc_collect() -> int:
+        nonlocal lock_held_during_gc
+        lock_held_during_gc = backend._decode_lock.locked()
+        return 0
+
+    mock_llm.close = fake_close
+    backend._llm = mock_llm
+    monkeypatch.setattr(gc, "collect", fake_gc_collect)
+
+    backend.unload()
+    assert lock_held_during_close is True
+    assert lock_held_during_gc is True
+    assert backend._llm is None
+    assert backend._decode_lock.locked() is False
+
+    load_lock_held = False
+
+    def fake_load() -> Any:
+        nonlocal load_lock_held
+        load_lock_held = backend._decode_lock.locked()
+        backend._llm = mock_llm
+        return mock_llm
+
+    backend._load = fake_load  # type: ignore[assignment]
+    backend.prewarm()
+    assert load_lock_held is True
+    assert backend._llm is mock_llm
+    assert backend._decode_lock.locked() is False

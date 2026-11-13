@@ -9,6 +9,7 @@ llm:
   keep_alive: "5m"
   timeout_s: 30.0
   temperature: 0.7
+  max_tokens: 512
   history_turns: 3
   history_max_tokens: 250
   # llamacpp optimization settings
