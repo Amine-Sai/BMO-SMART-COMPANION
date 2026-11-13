@@ -64,6 +64,14 @@ class ObjectData(Model):
     conf: float
 
 
+class ObjectRemovedData(Model):
+    label: str
+
+
+class EnrolledData(Model):
+    name: str
+
+
 class FaceIdentified(Model):
     v: Literal[1] = 1
     id: str
@@ -96,8 +104,38 @@ class ObjectSeen(Model):
     data: ObjectData
 
 
+class ObjectRemoved(Model):
+    v: Literal[1] = 1
+    id: str
+    ts: float
+    type: Literal["object_removed"] = "object_removed"
+    data: ObjectRemovedData
+
+
+class PersonEnrolled(Model):
+    v: Literal[1] = 1
+    id: str
+    ts: float
+    type: Literal["person_enrolled"] = "person_enrolled"
+    data: EnrolledData
+
+
+class ObjectEnrolled(Model):
+    v: Literal[1] = 1
+    id: str
+    ts: float
+    type: Literal["object_enrolled"] = "object_enrolled"
+    data: EnrolledData
+
+
 Event = Annotated[
-    FaceIdentified | PersonDetected | PersonLeft | ObjectSeen,
+    FaceIdentified
+    | PersonDetected
+    | PersonLeft
+    | ObjectSeen
+    | ObjectRemoved
+    | PersonEnrolled
+    | ObjectEnrolled,
     Field(discriminator="type"),
 ]
 EVENT_ADAPTER: TypeAdapter[Event] = TypeAdapter(Event)
@@ -142,7 +180,25 @@ class ForgetArgs(Model):
 class VisionCmd(Model):
     v: Literal[1] = 1
     id: str
-    cmd: Literal["enroll", "forget", "reload_gallery", "set_modules"]
+    cmd: Literal[
+        "enroll",
+        "enroll_person",
+        "forget",
+        "forget_person",
+        "reload_gallery",
+        "set_modules",
+        "get_context",
+        "set_mode",
+        "look",
+        "capture",
+        "status",
+        "register_object",
+        "delete_object",
+        "rename_person",
+        "rename_object",
+        "list_persons",
+        "list_objects",
+    ]
     args: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="before")
@@ -157,9 +213,10 @@ class VisionCmd(Model):
 
     @model_validator(mode="after")
     def _validate_args(self) -> Self:
-        if self.cmd in ("enroll", "forget"):
-            if "name" in self.args:
-                TypeAdapter(PersonName).validate_python(self.args["name"])
+        if self.cmd in ("enroll", "enroll_person", "forget", "forget_person"):
+            if "name" not in self.args:
+                raise ValueError(f"'name' is required in args for command '{self.cmd}'")
+            TypeAdapter(PersonName).validate_python(self.args["name"])
         return self
 
 

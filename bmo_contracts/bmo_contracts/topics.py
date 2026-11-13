@@ -14,7 +14,7 @@ from .models import (
     VisionStatus,
 )
 
-Role = Literal["cv", "brain"]
+Role = Literal["cv", "brain", "face_ui"]
 
 
 @dataclass(frozen=True)
@@ -88,7 +88,7 @@ TOPICS: dict[str, TopicSpec] = {
         retain=True,
         model=BrainStatus,
         pub_roles=("brain",),
-        sub_roles=("cv",),
+        sub_roles=("cv", "face_ui"),
     ),
     BRAIN_SAY: TopicSpec(
         name=BRAIN_SAY,
@@ -96,6 +96,6 @@ TOPICS: dict[str, TopicSpec] = {
         retain=False,
         model=BrainSay,
         pub_roles=("brain",),
-        sub_roles=(),
+        sub_roles=("face_ui",),
     ),
 }

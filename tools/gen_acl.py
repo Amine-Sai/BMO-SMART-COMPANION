@@ -10,7 +10,7 @@ from bmo_contracts.topics import (
     Role,
 )
 
-ROLES: tuple[Role, ...] = ("cv", "brain", "pi", "esp32")
+ROLES: tuple[Role, ...] = ("cv", "brain", "face_ui")
 
 
 def generate_acl_text() -> str:

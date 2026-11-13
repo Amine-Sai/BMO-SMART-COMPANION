@@ -10,7 +10,7 @@ import paho.mqtt.client as mqtt
 from paho.mqtt.enums import CallbackAPIVersion
 import pytest
 
-from bmo_contracts.topics import HW_CMD, VISION_EVENTS, VISION_STATUS
+from bmo_contracts.topics import BRAIN_SAY, VISION_EVENTS, VISION_STATUS
 from tools.gen_acl import generate_acl_text
 from tools.simple_broker import SimpleMQTTBroker, parse_passwords_file
 
@@ -121,15 +121,15 @@ def test_brain_publish_vision_events_blocked(broker_port: int) -> None:
     sub.loop_stop()
 
 
-def test_pi_publish_hw_cmd_blocked(broker_port: int) -> None:
-    sub = _client("pi", "pi_insecure_dev_password", broker_port)
+def test_face_ui_publish_brain_say_blocked(broker_port: int) -> None:
+    sub = _client("face_ui", "face_ui_insecure_dev_password", broker_port)
     recv: list[str] = []
     sub.on_message = lambda _c, _u, m: recv.append(m.payload.decode())
-    sub.subscribe(HW_CMD)
+    sub.subscribe(BRAIN_SAY)
     time.sleep(0.15)
 
-    pub = _client("pi", "pi_insecure_dev_password", broker_port)
-    pub.publish(HW_CMD, "blocked")
+    pub = _client("face_ui", "face_ui_insecure_dev_password", broker_port)
+    pub.publish(BRAIN_SAY, "blocked")
     time.sleep(0.2)
     assert not recv
     pub.loop_stop()
