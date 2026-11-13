@@ -27,19 +27,19 @@ class IdentityTools:
 
 def register_identity_tools(registry: ToolRegistry, vision_client: VisionClient) -> IdentityTools:
     tools = IdentityTools(vision_client=vision_client)
-    registry.register(
+    registry.register_if_absent(
         ToolSpec(
-            name="remember_person",
-            description="Enroll and remember a person's face.",
+            name="enroll_person",
+            description="Enroll and remember a person's face via the vision system.",
             schema=PersonNameArgs,
             handler=tools.remember_person,
             risky=False,
         )
     )
-    registry.register(
+    registry.register_if_absent(
         ToolSpec(
-            name="forget_person",
-            description="Forget an enrolled person's face.",
+            name="forget_person_face",
+            description="Forget an enrolled person's face from the vision system.",
             schema=PersonNameArgs,
             handler=tools.forget_person,
             risky=True,

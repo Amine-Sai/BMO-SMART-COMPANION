@@ -55,7 +55,7 @@ class MemoryTools:
         rows = self._memory.items()
         return {"ok": True, "facts": rows, "count": len(rows)}
 
-    def remember_person(self, args: RememberPersonArgs) -> dict[str, Any]:
+    def remember_person_fact(self, args: RememberPersonArgs) -> dict[str, Any]:
         item = self._memory.remember_person(args.name, args.details)
         return {"ok": True, "item": item}
 
@@ -74,7 +74,7 @@ class MemoryTools:
 
 def register_memory_tools(registry: ToolRegistry, memory: LongTermMemory) -> MemoryTools:
     tools = MemoryTools(memory)
-    registry.register(
+    specs = [
         ToolSpec(
             name="remember_fact",
             description=(
@@ -85,69 +85,57 @@ def register_memory_tools(registry: ToolRegistry, memory: LongTermMemory) -> Mem
             schema=RememberFactArgs,
             handler=tools.remember_fact,
             risky=False,
-        )
-    )
-    registry.register(
+        ),
         ToolSpec(
             name="recall_fact",
             description="Look up a previously saved fact by its key.",
             schema=RecallFactArgs,
             handler=tools.recall_fact,
             risky=False,
-        )
-    )
-    registry.register(
+        ),
         ToolSpec(
             name="forget_fact",
             description="Delete a saved fact from long-term memory.",
             schema=ForgetFactArgs,
             handler=tools.forget_fact,
             risky=False,
-        )
-    )
-    registry.register(
+        ),
         ToolSpec(
             name="list_facts",
             description="List everything currently saved in long-term memory.",
             schema=EmptyArgs,
             handler=tools.list_facts,
             risky=False,
-        )
-    )
-    registry.register(
+        ),
         ToolSpec(
-            name="remember_person",
-            description="Remember a person BMO has met (name and details).",
+            name="remember_person_fact",
+            description="Remember a person BMO has met (name and details) in long-term memory.",
             schema=RememberPersonArgs,
-            handler=tools.remember_person,
+            handler=tools.remember_person_fact,
             risky=False,
-        )
-    )
-    registry.register(
+        ),
         ToolSpec(
             name="remember_object",
             description="Remember an object BMO has learned (name and description).",
             schema=RememberObjectArgs,
             handler=tools.remember_object,
             risky=False,
-        )
-    )
-    registry.register(
+        ),
         ToolSpec(
             name="list_people",
-            description="List all people BMO remembers.",
+            description="List all people BMO remembers in long-term memory.",
             schema=EmptyArgs,
             handler=tools.list_people,
             risky=False,
-        )
-    )
-    registry.register(
+        ),
         ToolSpec(
             name="list_objects",
-            description="List all objects BMO remembers.",
+            description="List all objects BMO remembers in long-term memory.",
             schema=EmptyArgs,
             handler=tools.list_objects,
             risky=False,
-        )
-    )
+        ),
+    ]
+    for spec in specs:
+        registry.register_if_absent(spec)
     return tools

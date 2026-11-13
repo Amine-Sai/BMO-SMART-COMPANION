@@ -40,7 +40,7 @@ class SceneTools:
             "objects": list(scene.objects),
         }
 
-    def list_people(self, _args: EmptyArgs | dict[str, Any] | None = None, **_kwargs: Any) -> dict[str, Any]:
+    def list_visible_people(self, _args: EmptyArgs | dict[str, Any] | None = None, **_kwargs: Any) -> dict[str, Any]:
         scene = self._scene_cache.current()
         if scene is None:
             return {"ok": False, "error": "scene_stale"}
@@ -53,7 +53,7 @@ class SceneTools:
 def register_scene_tools(registry: ToolRegistry, scene_cache: SceneCache) -> SceneTools:
     """Register read-only scene tools with the given tool registry."""
     tools = SceneTools(scene_cache)
-    registry.register(
+    registry.register_if_absent(
         ToolSpec(
             name="get_scene",
             description="Get the current scene description and detected objects or people.",
@@ -62,7 +62,7 @@ def register_scene_tools(registry: ToolRegistry, scene_cache: SceneCache) -> Sce
             risky=False,
         )
     )
-    registry.register(
+    registry.register_if_absent(
         ToolSpec(
             name="find_object",
             description="Check if a specific object is visible in the current scene.",
@@ -71,12 +71,12 @@ def register_scene_tools(registry: ToolRegistry, scene_cache: SceneCache) -> Sce
             risky=False,
         )
     )
-    registry.register(
+    registry.register_if_absent(
         ToolSpec(
-            name="list_people",
+            name="list_visible_people",
             description="List people currently visible in the scene.",
             schema=EmptyArgs,
-            handler=tools.list_people,
+            handler=tools.list_visible_people,
             risky=False,
         )
     )

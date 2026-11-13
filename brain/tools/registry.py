@@ -36,6 +36,13 @@ class ToolRegistry:
             raise ValueError(f"Tool {spec.name!r} already registered")
         self._specs[spec.name] = spec
 
+    def register_if_absent(self, spec: ToolSpec) -> bool:
+        """Register tool only if not already present. Returns True if registered, False if already existed."""
+        if spec.name in self._specs:
+            return False
+        self._specs[spec.name] = spec
+        return True
+
     def reset(self) -> None:
         self._pending = None
 

@@ -63,7 +63,7 @@ def test_scene_tools_fresh() -> None:
     assert direct_found["ok"] is True
     assert direct_found["found"] is True
 
-    direct_people = tools.list_people()
+    direct_people = tools.list_visible_people()
     assert direct_people["ok"] is True
     assert len(direct_people["people"]) == 1
 
@@ -85,7 +85,7 @@ def test_scene_tools_fresh() -> None:
     assert res_not_found["ok"] is True
     assert res_not_found["found"] is False
 
-    res_people = _dispatch(registry, "list_people", EmptyArgs())
+    res_people = _dispatch(registry, "list_visible_people", EmptyArgs())
     assert res_people["ok"] is True
     assert res_people["people"] == [p.model_dump(mode="json") for p in scene.people]
 
@@ -102,7 +102,7 @@ def test_scene_tools_stale_before_scene() -> None:
     res_find = _dispatch(registry, "find_object", FindObjectArgs(name="cup"))
     assert res_find == {"ok": False, "error": "scene_stale"}
 
-    res_people = _dispatch(registry, "list_people", EmptyArgs())
+    res_people = _dispatch(registry, "list_visible_people", EmptyArgs())
     assert res_people == {"ok": False, "error": "scene_stale"}
 
 
@@ -126,7 +126,7 @@ def test_scene_tools_stale_vision_offline() -> None:
     res_find = _dispatch(registry, "find_object", FindObjectArgs(name="mug"))
     assert res_find == {"ok": False, "error": "scene_stale"}
 
-    res_people = _dispatch(registry, "list_people", EmptyArgs())
+    res_people = _dispatch(registry, "list_visible_people", EmptyArgs())
     assert res_people == {"ok": False, "error": "scene_stale"}
 
 
@@ -150,5 +150,5 @@ def test_scene_tools_stale_clock_expired() -> None:
     res_find = _dispatch(registry, "find_object", FindObjectArgs(name="bottle"))
     assert res_find == {"ok": False, "error": "scene_stale"}
 
-    res_people = _dispatch(registry, "list_people", EmptyArgs())
+    res_people = _dispatch(registry, "list_visible_people", EmptyArgs())
     assert res_people == {"ok": False, "error": "scene_stale"}
