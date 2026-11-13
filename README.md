@@ -58,7 +58,7 @@ The name comes from the character BMO from Adventure Time - a small sentient gam
 
 ```bash
 # Clone the repo
-git clone <your-repo> && cd bmo-assistant
+git clone https://github.com/Amine-Sai/BMO-SMART-COMPANION.git && cd BMO-SMART-COMPANION
 
 # Set up virtual environment
 python -m venv .venv
