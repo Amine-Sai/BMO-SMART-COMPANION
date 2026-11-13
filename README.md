@@ -1,130 +1,237 @@
-# BMO Assistant
+<p align="center">
+  <img src="BMO Face/default-face.svg" alt="BMO Face" width="200"/>
+</p>
 
-An embodied AI companion and conversational desktop assistant powered by on-device computer vision, local speech pipeline (Wake Word, VAD, STT, TTS), LLM dialogue orchestration, and edge microcontrollers.
+<h1 align="center">BMO Assistant</h1>
 
----
+<p align="center">
+  <em>An embodied AI companion and conversational desktop assistant</em>
+</p>
 
-## 1. System Architecture
-
-```mermaid
-flowchart TD
-    subgraph Vision Node [assistant_cv]
-        CAM[Camera Frame Loop]
-        YOLO[Object Detection]
-        FACE[Face Identification]
-        MEM[Scene Memory Cache]
-        CAM --> YOLO & FACE
-        YOLO & FACE --> MEM
-    end
-
-    subgraph Messaging [MQTT Broker]
-        BROKER((Mosquitto Broker\nbmo/# topics))
-    end
-
-    subgraph Brain Node [bmo-brain]
-        B_MAIN[BrainService Entrypoint]
-        SM[BrainStateMachine]
-        TURN[TurnManager & Audio Pipeline]
-        POL[ProactivePolicy]
-        EDGE_MON[EdgeMonitor & Audio Fallback]
-        TOOLS[Allowlisted Tool Registry]
-        LLM[Local LLM Client]
-
-        B_MAIN --> SM & TURN & POL & EDGE_MON & TOOLS & LLM
-    end
-
-    subgraph Edge Body [bmo-pi & ESP32]
-        PI[Raspberry Pi 4 / 5\nMic, Speaker, LCD]
-        ESP[ESP32 Controller\nServos, Expressions]
-    end
-
-    MEM -->|bmo/vision/context\nbmo/vision/events\nbmo/vision/status| BROKER
-    BROKER -->|bmo/vision/cmd| MEM
-
-    BROKER <-->|bmo/brain/status\nbmo/brain/say\nbmo/vision/#\nbmo/hw/#| B_MAIN
-
-    PI <-->|bmo/hw/status\nbmo/hw/event\nbmo/brain/say| BROKER
-    BROKER -->|bmo/hw/cmd| ESP
-```
+<p align="center">
+  <a href="#-quick-start">Quick Start</a> •
+  <a href="#-features">Features</a> •
+  <a href="#-architecture">Architecture</a> •
+  <a href="#-mqtt-topics">MQTT Topics</a> •
+  <a href="#-testing">Testing</a>
+</p>
 
 ---
 
-## 2. MQTT Topic Contracts & Roles
+## 🤖 Meet BMO
 
-All topic constants are centralized in `bmo_contracts.topics` and payload models in `bmo_contracts.models`.
+**BMO** (pronounced **Bee-M-O**) is your personal desktop companion — a friendly face that lives on your screen, sees through your camera, hears your voice, and remembers the people and things you introduce.
 
-| Topic Constant | Topic Path | Direction / Role | QoS | Retain | Description |
-|---|---|---|:---:|:---:|---|
-| `VISION_STATUS` | `bmo/vision/status` | cv → all (`brain`, `pi`) | 1 | Yes | Camera subsystem online status (with LWT) |
-| `VISION_EVENTS` | `bmo/vision/events` | cv → `brain` | 1 | No | Discrete perception events (face, person, object) |
-| `VISION_CONTEXT` | `bmo/vision/context` | cv → `brain` | 0 | Yes | Current scene summary context (people, objects) |
-| `VISION_CMD` | `bmo/vision/cmd` | `brain` → cv | 1 | No | Vision management commands (`enroll`, `forget`, etc.) |
-| `VISION_CMD_RESULT` | `bmo/vision/cmd_result` | cv → `brain` | 1 | No | Handshake reply for vision commands |
-| `BRAIN_STATUS` | `bmo/brain/status` | `brain` → all (`cv`, `pi`) | 1 | Yes | Brain state (`idle`, `listening`, `thinking`, `speaking`, `muted`) |
-| `BRAIN_SAY` | `bmo/brain/say` | `brain` → `pi` | 1 | No | Spoken output utterances with assigned emotion |
-| `HW_CMD` | `bmo/hw/cmd` | `brain` → `pi`, `esp32` | 1 | No | Actuator hardware commands (`move_servo`, `set_expression`) |
-| `HW_STATUS` | `bmo/hw/status` | `pi`, `esp32` → `brain` | 1 | Yes | Hardware heartbeat and peripheral capability reporting |
-| `HW_EVENT` | `bmo/hw/event` | `pi`, `esp32` → `brain` | 1 | No | Hardware switch and button events (e.g. `mute_switch`) |
+<div align="center">
+  <img src="BMO Face/happy-face.svg" alt="BMO Happy" width="120"/>
+  <img src="BMO Face/talking-face.svg" alt="BMO Talking" width="120"/>
+  <img src="BMO Face/playful-face.svg" alt="BMO Playful" width="120"/>
+</div>
 
 ---
 
-## 3. Service Startup & Operations
+## ✨ Features
 
-### CLI Direct Execution
+| Feature | Description |
+|---------|-------------|
+| 👁️ **Computer Vision** | Real-time face recognition (InsightFace) + object/person detection (YOLO26s) |
+| 🎤 **Voice Interface** | Wake word ("Hey Bee MO"), VAD, Whisper STT, Piper TTS |
+| 🧠 **LLM Brain** | Local llama.cpp/Ollama with tool-calling for memory & vision |
+| 💾 **Persistent Memory** | Remembers people, objects, preferences, and facts across sessions |
+| 😊 **Expressive Face** | 18 emotional SVG expressions with lip-sync |
+| 🔌 **MQTT Integration** | Clean pub/sub between vision, brain, and tools |
+| 💻 **Laptop Native** | Runs entirely on your machine — no Pi/ESP32 needed |
 
-Start the core BMO brain service directly from the virtual environment:
+---
+
+## 🚀 Quick Start
+
+### Prerequisites
+- Python 3.11+
+- CUDA-capable GPU (for LLM & face recognition)
+- Webcam
+- Microphone & speakers
+
+### Installation
 
 ```bash
-# Start Brain Service against default local broker (127.0.0.1:1883)
+# Clone and enter
+git clone <your-repo> && cd bmo-assistant
+
+# Create venv and install
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .
+
+# Download model weights (one-time)
+.venv/bin/python tools/fetch_assets.py
+```
+
+### Run Everything
+
+```bash
+# Terminal 1: MQTT Broker
+mosquitto -c /etc/mosquitto/mosquitto.conf
+
+# Terminal 2: Vision Pipeline (camera + face/object detection)
+.venv/bin/python -m assistant_cv.main
+
+# Terminal 3: Brain Service (voice + LLM + memory)
 .venv/bin/python -m brain.main
-
-# Start with custom broker endpoint
-.venv/bin/python -m brain.main --host 127.0.0.1 --port 1883
 ```
 
-### Systemd User Services
-
-User services preserve desktop session access (PipeWire / ALSA audio devices):
+Or use the unified launcher:
 
 ```bash
-# Link or install unit files to systemd user directory
+.venv/bin/python run_all.py
+```
+
+### Systemd (Linux)
+
+```bash
+# Install user services
 mkdir -p ~/.config/systemd/user
 cp deploy/systemd/*.service ~/.config/systemd/user/
 
-# Reload user daemon
+# Start all services
 systemctl --user daemon-reload
+systemctl --user start bmo-broker bmo-cv bmo-brain
 
-# Start broker, vision, brain, and edge peers
-systemctl --user start bmo-broker bmo-cv bmo-brain bmo-pi
-
-# Enable services to run on boot
-systemctl --user enable bmo-broker bmo-cv bmo-brain bmo-pi
-
-# Check service status
-systemctl --user status bmo-brain
+# Enable on boot
+systemctl --user enable bmo-broker bmo-cv bmo-brain
 ```
 
 ---
 
-## 4. Verification & Testing
+## 🏗️ Architecture
 
-Run all unit, integration, and repository hygiene tests inside `.venv`:
+```mermaid
+flowchart TD
+    subgraph Vision[assistant_cv]
+        CAM[Camera Loop]
+        YOLO[YOLO26s Detection]
+        FACE[InsightFace Recognition]
+        MEM[Scene Memory]
+        CAM --> YOLO & FACE --> MEM
+    end
+
+    subgraph Broker[Mosquitto MQTT]
+        MQTT((bmo/# topics))
+    end
+
+    subgraph Brain[bmo-brain]
+        MAIN[BrainService]
+        SM[State Machine]
+        TURN[Turn Manager]
+        POL[Proactive Policy]
+        MUTE[Mute Monitor]
+        TOOLS[Tool Registry]
+        LTM[LongTermMemory]
+        LLM[Local LLM]
+        MAIN --> SM & TURN & POL & MUTE & TOOLS & LTM & LLM
+    end
+
+    MEM -->|vision/status<br/>vision/events<br/>vision/context| MQTT
+    MQTT -->|vision/cmd| MEM
+    MQTT <-->|brain/status<br/>brain/say<br/>vision/#| MAIN
+```
+
+**Three processes, one MQTT bus:**
+- **assistant_cv** — camera, detection, face ID, scene memory
+- **bmo-brain** — wake word, STT/TTS, LLM, dialogue, memory, policy
+- **mosquitto** — message broker (localhost:1883)
+
+---
+
+## 📡 MQTT Topics
+
+| Topic | Direction | QoS | Retain | Description |
+|-------|-----------|-----|--------|-------------|
+| `bmo/vision/status` | cv → brain | 1 | ✓ | Camera online + LWT |
+| `bmo/vision/events` | cv → brain | 1 | ✗ | Face/person/object events |
+| `bmo/vision/context` | cv → brain | 0 | ✓ | Current scene (people, objects) |
+| `bmo/vision/cmd` | brain → cv | 1 | ✗ | Enroll, forget, look, modules |
+| `bmo/vision/cmd_result` | cv → brain | 1 | ✗ | Command acknowledgments |
+| `bmo/brain/status` | brain → cv | 1 | ✓ | Brain state (idle/listening/thinking/speaking/muted) |
+| `bmo/brain/say` | brain → TTS | 1 | ✗ | Utterances with emotion |
+
+All topics defined in [`bmo_contracts/topics.py`](bmo_contracts/bmo_contracts/topics.py), payloads in [`models.py`](bmo_contracts/bmo_contracts/models.py).
+
+---
+
+## 💬 Usage Examples
+
+**Wake BMO:**
+> "Hey Bee MO, what time is it?"
+
+**Introduce someone:**
+> "Hey Bee MO, this is my friend Alice."
+> *BMO enrolls Alice's face and remembers her.*
+
+**Teach an object:**
+> "Hey Bee MO, remember this is my favorite blue mug."
+> *BMO saves "blue mug" to long-term memory.*
+
+**Ask about memory:**
+> "Hey Bee MO, who have you met today?"
+> *BMO lists remembered people from persistent memory.*
+
+**Mute/Unmute:**
+> Press the mute key or send `{"kind": "mute_switch", "value": true}` to BMO's input.
+
+---
+
+## 🧪 Testing
 
 ```bash
-# Run repository hygiene and contract validation
-.venv/bin/python -m pytest tests/test_hygiene.py tests/test_t01_contracts.py -v
+# Contract validation
+.venv/bin/python -m pytest tests/test_t01_contracts.py -v
 
-# Run End-to-End System test suite
-.venv/bin/python -m pytest tests/test_e2e_system.py -v
-
-# Run full fast test suite
+# Full fast suite (no GPU/hardware/broker)
 .venv/bin/python -m pytest -m "not gpu and not slow and not hw and not broker" -q
 
-# Run all 40 task acceptance gates verification
+# Acceptance gates
 .venv/bin/python tools/check_acceptance.py
 
-# Linting and formatting checks
-.venv/bin/ruff check --select F,ARG,ERA,B bmo_contracts brain edge tools evals tests
-.venv/bin/ruff format --check bmo_contracts brain edge tools evals tests
-.venv/bin/vulture bmo_contracts brain edge tools evals --min-confidence 80
+# Lint & format
+.venv/bin/ruff check --select F,ARG,ERA,B bmo_contracts brain tools tests
+.venv/bin/ruff format --check bmo_contracts brain tools tests
 ```
+
+---
+
+## 📁 Project Structure
+
+```
+bmo-assistant/
+├── assistant_cv/       # Vision pipeline (camera, YOLO, InsightFace, MQTT bridge)
+├── brain/              # Brain service (audio, LLM, memory, policy, tools)
+├── bmo_contracts/      # MQTT topic & payload definitions (Pydantic)
+├── face_ui/            # BMO animated face (PyGame, 18 expressions)
+├── config/             # YAML settings (audio, LLM, policy, scene)
+├── deploy/             # systemd service files
+├── docs/               # Contracts specification
+├── tests/              # Unit, integration, contract tests
+├── tools/              # Asset fetch, mock CV, broker, benchmarking
+└── run_all.py          # Unified launcher
+```
+
+---
+
+## 🙏 Acknowledgements
+
+- **InsightFace** — face detection & recognition
+- **Ultralytics YOLO** — object detection
+- **faster-whisper** — speech-to-text
+- **Piper TTS** — text-to-speech
+- **openWakeWord** — wake word detection
+- **llama.cpp / Ollama** — local LLM inference
+- **Mosquitto** — MQTT broker
+
+---
+
+<p align="center">
+  <img src="BMO Face/sleeping-face.svg" alt="BMO Sleeping" width="80"/>
+  <br>
+  <em>Built with ❤️ for local-first AI companionship</em>
+</p>
