@@ -65,3 +65,7 @@ tmp/
 temp/
 *.tmp
 *.temp
+
+# Communication & execution tracking
+/PLAN.md
+/PROGRESS.md
