@@ -69,6 +69,25 @@ pip install -e .
 .venv/bin/python tools/fetch_assets.py
 ```
 
+### Model Downloads
+
+Heavy model files are **not included in the repo** — they download on first run via `fetch_assets.py`:
+
+| Model | Purpose | Size | Location |
+|-------|---------|------|----------|
+| LLM (GGUF) | Local language model | ~2.6 GB | `models/` |
+| YOLO26s | Object/person detection | ~50 MB | `assistant_cv/models/` |
+| YOLO-World | Open-vocabulary detection | ~50 MB | `assistant_cv/models/` |
+| InsightFace (SCRFD + ArcFace) | Face detection + recognition | ~200 MB | `assistant_cv/models/` |
+| Piper voice (BMO) | Custom text-to-speech | ~61 MB | `models/piper/` |
+| openWakeWord | Wake word detection | ~15 MB | `openwakeword/resources/` |
+| Whisper (base.en) | Speech-to-text | ~140 MB | HF cache |
+| Silero VAD | Voice activity detection | ~10 MB | HF cache |
+
+**Total download: ~3 GB** — requires internet on first run.
+
+If `fetch_assets.py` fails, you can download manually from the sources listed in `tools/fetch_assets.py`.
+
 ### Running it
 
 You need three terminals:
