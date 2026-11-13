@@ -44,7 +44,7 @@ from brain.privacy import sanitize_payload
 from brain.prompt import PromptBuilder
 from brain.scene import SceneCache
 from brain.settings import AudioSettings, PolicySettings, SceneSettings, Settings, load_settings
-from brain.state import BrainState, BrainStateMachine
+from brain.state import BrainState, BrainStateMachine, InvalidTransitionError
 from brain.tools.identity_tools import register_identity_tools
 from brain.tools.registry import ToolRegistry
 from brain.tools.scene_tools import register_scene_tools
@@ -70,13 +70,14 @@ class BrainService:
         stt: SpeechToText | None = None,
         tts: TextToSpeech | None = None,
         clock: Callable[[], float] = time.monotonic,
+        mqtt_client: Client | None = None,
     ) -> None:
         self._settings = settings or load_settings()
         self._host = host
         self._port = port
         self._clock = clock
 
-        self._client = Client(CallbackAPIVersion.VERSION2)
+        self._client = mqtt_client or Client(CallbackAPIVersion.VERSION2)
         if username:
             self._client.username_pw_set(username, password)
         self._client.on_connect = self._on_connect
@@ -123,21 +124,22 @@ class BrainService:
             clock=self._clock,
         )
 
-        policy_settings = self._settings.policy or PolicySettings(
+        self._policy_settings = self._settings.policy or PolicySettings(
             face_min_conf=0.65,
             greeting_cooldown_s=900.0,
             global_cooldown_s=30.0,
             walk_by_window_s=1.5,
             idle_unload_s=300.0,
+            tick_interval_s=1.0,
         )
         self.policy = ProactivePolicy(
-            settings=policy_settings,
+            settings=self._policy_settings,
             state_machine=self.state_machine,
             on_greet=self._on_proactive_greet,
             clock=self._clock,
         )
         self.lifecycle = IdleLifecycleManager(
-            settings=policy_settings,
+            settings=self._policy_settings,
             scene_cache=self.scene_cache,
             state_machine=self.state_machine,
             vision_client=self.vision_client,
@@ -147,6 +149,7 @@ class BrainService:
 
         self._running = False
         self._audio_thread: threading.Thread | None = None
+        self._tick_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
 
     @property
@@ -158,6 +161,7 @@ class BrainService:
         self._client.publish(topic, raw, qos=qos, retain=retain)
 
     def _on_proactive_greet(self, greeting: str) -> None:
+        self.lifecycle.notify_activity()
         if self.state_machine.state == BrainState.IDLE:
             self.turn_manager.start_text_turn(greeting)
 
@@ -227,13 +231,38 @@ class BrainService:
 
     def _audio_loop(self) -> None:
         while not self._stop_event.is_set():
-            frame = self.edge_monitor.read_frame(timeout_s=0.05)
-            if frame is not None:
-                self.turn_manager.process_audio_frame(frame, source=self.edge_monitor.active_source)
-            else:
+            try:
+                if self.state_machine.state == BrainState.LISTENING:
+                    time.sleep(0.02)
+                    continue
+
+                frame = self.edge_monitor.read_frame(timeout_s=0.05)
+                if frame is not None:
+                    try:
+                        event = self.turn_manager.process_audio_frame(
+                            frame, source=self.edge_monitor.active_source
+                        )
+                        if event is not None or self.state_machine.state != BrainState.IDLE:
+                            self.lifecycle.notify_activity()
+                    except InvalidTransitionError as exc:
+                        logging.warning("Audio loop transition error: %s", exc)
+                else:
+                    time.sleep(0.02)
+            except Exception as exc:
+                logging.exception("Audio loop error: %s", exc)
                 time.sleep(0.02)
 
-    def start(self, run_audio_loop: bool = True) -> None:
+    def _tick_loop(self) -> None:
+        interval = self._policy_settings.tick_interval_s
+        while not self._stop_event.is_set():
+            try:
+                self.policy.tick()
+                self.lifecycle.tick()
+            except Exception as exc:
+                logging.exception("Error in tick loop: %s", exc)
+            self._stop_event.wait(timeout=interval)
+
+    def start(self, run_audio_loop: bool = True, run_tick_loop: bool = True) -> None:
         self._running = True
         self._stop_event.clear()
         self._client.connect(self._host, self._port)
@@ -241,16 +270,28 @@ class BrainService:
         if run_audio_loop:
             self._audio_thread = threading.Thread(target=self._audio_loop, daemon=True)
             self._audio_thread.start()
+        if run_tick_loop:
+            self._tick_thread = threading.Thread(target=self._tick_loop, daemon=True)
+            self._tick_thread.start()
 
     def stop(self) -> None:
         self._stop_event.set()
         if self._audio_thread and self._audio_thread.is_alive():
             self._audio_thread.join(timeout=1.0)
             self._audio_thread = None
+        if self._tick_thread and self._tick_thread.is_alive():
+            self._tick_thread.join(timeout=1.0)
+            self._tick_thread = None
         if self._running:
-            self._publish_raw(BRAIN_STATUS, BrainStateMachine.last_will_payload(), qos=1, retain=True)
-            self._client.loop_stop()
-            self._client.disconnect()
+            try:
+                self._publish_raw(BRAIN_STATUS, BrainStateMachine.last_will_payload(), qos=1, retain=True)
+            except Exception as exc:
+                logging.warning("Failed to publish last will on stop: %s", exc)
+            try:
+                self._client.loop_stop()
+                self._client.disconnect()
+            except Exception as exc:
+                logging.warning("Error stopping MQTT client: %s", exc)
             self._running = False
         self.sink.close()
         self.source.close()
