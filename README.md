@@ -227,6 +227,8 @@ run_all.py          # Unified launcher
 - openWakeWord for wake word detection
 - llama.cpp and Ollama for local LLM inference
 - Mosquitto for MQTT broker
+- BMO face templates from [Figma Community](https://www.figma.com/community/file/1379945530999597632/bmo-face-templates-assets)
+- BMO voice model from [brenpoly/be-more-agent](https://github.com/brenpoly/be-more-agent/releases/tag/v1.0-voice)
 
 ---
 
