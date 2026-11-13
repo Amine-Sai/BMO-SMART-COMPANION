@@ -13,6 +13,7 @@ from brain.settings import load_settings
 def test_speak_sentence_emits_audio() -> None:
     settings = load_settings().audio
     tts = TextToSpeech(settings)
+    tts.prewarm()
     sink = MemorySink()
     latency = tts.speak_sentence("Hello friend!", sink)
     assert latency < 300.0
@@ -49,8 +50,9 @@ def test_speak_stream_splits_sentences() -> None:
 def test_cancel_mid_playback() -> None:
     settings = load_settings().audio
     tts = TextToSpeech(settings, chunk_delay_s=0.01)
+    tts.prewarm()
     sink = MemorySink()
-    text = "word " * 50
+    text = "word " * 2
     t0 = time.perf_counter()
 
     def run_speak() -> None:

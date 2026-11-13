@@ -35,7 +35,7 @@ def test_remember_person_dispatch() -> None:
 
     bus.responder = lambda cmd: VisionCmdResult(id=cmd.id, ok=True, detail="enrolled") if cmd.cmd == "enroll" else None
 
-    res = registry.dispatch({"name": "remember_person", "arguments": {"name": "Jud"}})
+    res = registry.dispatch({"name": "enroll_person", "arguments": {"name": "Jud"}})
     assert res["ok"] is True
     assert res["name"] == "Jud"
     assert res["detail"] == "enrolled"
@@ -59,18 +59,18 @@ def test_forget_person_dispatch_confirmation() -> None:
 
     # First call (unconfirmed): should return needs_confirmation and not publish
     res_unconfirmed = registry.dispatch(
-        {"name": "forget_person", "arguments": {"name": "Jud"}},
+        {"name": "forget_person_face", "arguments": {"name": "Jud"}},
         confirmed=False,
     )
     assert res_unconfirmed["ok"] is False
     assert res_unconfirmed["needs_confirmation"] is True
-    assert res_unconfirmed["tool"] == "forget_person"
+    assert res_unconfirmed["tool"] == "forget_person_face"
     assert len(bus.published) == 0
     assert len(bus.published_cmds) == 0
 
     # Second call (confirmed): should publish and return success
     res_confirmed = registry.dispatch(
-        {"name": "forget_person", "arguments": {"name": "Jud"}},
+        {"name": "forget_person_face", "arguments": {"name": "Jud"}},
         confirmed=True,
     )
     assert res_confirmed["ok"] is True
@@ -97,11 +97,11 @@ def test_forget_person_failure_and_timeout() -> None:
     )
 
     registry.dispatch(
-        {"name": "forget_person", "arguments": {"name": "Unknown"}},
+        {"name": "forget_person_face", "arguments": {"name": "Unknown"}},
         confirmed=False,
     )
     res_fail = registry.dispatch(
-        {"name": "forget_person", "arguments": {"name": "Unknown"}},
+        {"name": "forget_person_face", "arguments": {"name": "Unknown"}},
         confirmed=True,
     )
     assert res_fail["ok"] is False
